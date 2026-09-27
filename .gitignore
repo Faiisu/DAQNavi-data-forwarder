@@ -1,0 +1,10 @@
+.env
+/config/
+__pycache__/
+*.py[cod]
+.venv/
+*.log
+*.sqlite*
+*.db
+.scratch/
+.agents/
