@@ -55,6 +55,8 @@ class StandaloneComposeTests(unittest.TestCase):
         dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
         self.assertIn("FROM python:3.12", dockerfile)
         self.assertIn("COPY requirements.txt", dockerfile)
+        self.assertIn("requirements.lock", dockerfile)
+        self.assertIn("--require-hashes -r /app/requirements.lock", dockerfile)
         self.assertIn("entrypoint.sh", dockerfile)
 
     def test_entrypoint_uses_web_service_by_default_and_only_hardware_headless(self):

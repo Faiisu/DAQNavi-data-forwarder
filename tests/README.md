@@ -2,11 +2,21 @@
 
 ## Automated suite
 
-Install the project and test dependencies, then run the suite from the repository root:
+Install `uv` using the [official installation guide](https://docs.astral.sh/uv/getting-started/installation/). The test environment uses Python 3.12, matching the application image. From the repository root, create an isolated environment, install the project and test dependencies, then run the suite:
 
 ```bash
-python3 -m pip install -r requirements-test.txt
-python3 -m unittest discover -s tests -v
+uv venv --python 3.12
+uv pip install --python .venv/bin/python --require-hashes -r requirements-test.txt
+. .venv/bin/activate
+python -m unittest discover -s tests -v
+```
+
+The application Docker image and tests install the exact versions and SHA-256 verified distributions in `requirements.lock`. `requirements.txt` lists direct runtime dependencies and is the input for the lock file; `requirements-test.txt` uses the same lock because the automated suite needs no additional packages.
+
+When intentionally updating dependencies, use `uv` 0.12.17 and Python 3.12 from the repository root, then review the lock-file diff and run this suite:
+
+```bash
+uv pip compile requirements.txt --python-version 3.12 --generate-hashes --no-header --output-file requirements.lock
 ```
 
 The suite exercises the standalone DAQNavi app, production spool and writer, web API, Compose deployment contract, and MQTT wire contract. It does not require a physical DAQ or a live destination for the normal unit run. Database-backed TimescaleDB tests are skipped unless `DAQ_TEST_DB_DSN` names an isolated database beginning with `daq_navi_test_`. Never point tests at a production database or spool. No linter is configured in this repository.
@@ -16,6 +26,18 @@ If running the suite inside an existing DAQNavi container after changing tests o
 Legacy checks for the removed setup wizard, monorepo SQL bootstrap, and shared Compose stack remain in the test tree as skipped tests, so their history is preserved without implying that those components ship with this standalone service.
 
 Tests that require a real DAQ or TimescaleDB are qualification procedures below, not part of unittest discovery.
+
+## Full-system end-to-end test
+
+`tests/test_e2e_full_system.py` targets a dedicated test stack with the web service at `localhost:8081`, test services named `pg`, `influx`, and `mqtt`, an isolated `daq_navi_test_local` database, MQTT test certificates under `/qa/mqtt/`, and a supported physical DAQ. The isolated Compose project and run instructions are in [deploy/e2e](../deploy/e2e/README.md). Run the script inside the DAQNavi service from that directory:
+
+```bash
+docker compose exec -T daq-navi-e2e sh /run-e2e.sh
+```
+
+The script installs `requirements-test.txt` and copies its summary to `deploy/e2e/reports/e2e_report.json` on the host.
+
+This test writes and drops uniquely named tables in the test database and changes the web service configuration and acquisition lifecycle. Run it only against a disposable qualification stack and test database, never a production service or destination. Inside the container, it first writes the summary to `/tmp/e2e_report.json`.
 
 ## Physical DAQ qualification
 

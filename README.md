@@ -4,7 +4,7 @@ DAQNavi lets an operator configure an Advantech DAQ device, collect analog measu
 
 ## Prerequisites
 
-- Linux host with Docker Engine, the Docker Compose plugin, and OpenSSL for generating a session key. The image uses Python 3.12. See [host preparation and installation](DEPLOY.md#prepare-the-linux-host) for install instructions.
+- Linux host with Docker Engine, the Docker Compose plugin, and OpenSSL for generating a session key. The Docker image includes Python 3.12. See [host preparation and installation](DEPLOY.md#prepare-the-linux-host) for install instructions.
 - A reachable destination managed outside this Compose project. The service can start before one is configured, but acquisition needs a working destination.
 - For physical capture: a supported Advantech DAQ card and the DAQNavi/BioDAQ Linux driver and SDK installed on the host. The container receives the host device nodes and driver libraries through Compose; Docker does not install the vendor driver.
 
@@ -40,7 +40,7 @@ Device, channel, and destination settings are saved in `config/config.json` by C
 
 ## Testing and linting
 
-The [test and qualification guide](tests/README.md) documents the standalone unit test command and separate physical qualification procedures. This checkout has no configured lint command.
+Install the project and test dependencies with `uv`, then run the suite as documented in the [test and qualification guide](tests/README.md). For the isolated full-system E2E deployment, see [deploy/e2e](deploy/e2e/README.md). This checkout has no configured lint command.
 
 ## Architecture
 

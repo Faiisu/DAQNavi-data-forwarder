@@ -1,6 +1,6 @@
 # Standalone deployment and operations
 
-This Docker Compose project deploys the DAQNavi service. The destination database or MQTT broker is managed separately and must already be reachable. Linux is the supported host for physical DAQ acquisition.
+This Docker Compose project deploys the standalone DAQNavi service. The destination database or MQTT broker is managed separately and must be reachable before acquisition starts. Linux is the supported host for physical DAQ acquisition. For the isolated full-system E2E deployment, see [deploy/e2e](deploy/e2e/README.md).
 
 ---
 
@@ -18,7 +18,7 @@ Before starting, ensure the host meets the following requirements:
      docker compose version
      ```
 2. **OpenSSL:** Required on the host to generate session secrets.
-3. **External Destination:** An accessible TimescaleDB / PostgreSQL, InfluxDB 2.x, or MQTT broker.
+3. **External Destination:** A TimescaleDB / PostgreSQL, InfluxDB 2.x, or MQTT broker must be accessible before starting acquisition. The web service can start without one.
 4. **Physical DAQ Card:**
    - Connect and power the Advantech DAQ card on the Linux host.
    - Install the vendor driver & SDK ([Advantech DAQNavi Driver for Linux](https://www.advantech.com/en-sg/support/details/driver?id=1-LXHFQJ)) matching your kernel (`uname -r`) and architecture (`uname -m`).
@@ -42,6 +42,8 @@ chmod 600 .env
 The closed deployment uses `ALLOWED_ORIGINS=*`, so operators can open DAQNavi through any host address on that network. Authentication still applies. This setting accepts every browser Origin header; if the service later becomes reachable from a less trusted network, set a comma-separated list of the exact browser origins instead.
 
 ### Step 2: Build and Start DAQNavi
+
+The Docker image includes Python 3.12 and installs the pinned, hash-verified packages from `requirements.lock` during the build.
 
 Start the service container in the background:
 

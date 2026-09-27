@@ -1,0 +1,96 @@
+name: daq-navi-e2e
+
+services:
+  daq-navi-e2e:
+    build:
+      context: ../..
+    container_name: daq_navi_e2e
+    privileged: true
+    restart: unless-stopped
+    environment:
+      LD_LIBRARY_PATH: /opt/advantech/libs:/usr/lib
+      DAQ_PORT: 8081
+      DAQ_OPERATOR_USER: admin
+      DAQ_OPERATOR_HASH: pbkdf2_sha256:100000:b5fa8a65cb0d3df701a753855dfc87c1:e4586d94fcfb275047e4704b5aa83ea0eb7240b42c65e9959ac2014386f3f684
+      DAQ_OPERATOR_HASH_FILE: /var/lib/daq_navi/spool/operator_hash
+      DAQ_SESSION_KEY: e2e-only-session-key-change-for-local-test-stack
+      ALLOWED_ORIGINS: '*'
+      DAQ_CONFIG_PATH: /app/config/config.json
+    ports:
+      - "8081:8081"
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    volumes:
+      - /dev:/dev
+      - /usr/lib:/usr/lib:ro
+      - /opt/advantech:/opt/advantech:ro
+      - /etc/biobdaq:/etc/biobdaq:ro
+      - /var/lib/daq:/var/lib/daq:ro
+      - ./config:/app/config
+      - ./mqtt:/qa/mqtt:ro
+      - ./reports:/reports
+      - ./run-e2e.sh:/run-e2e.sh:ro
+      - ./prepare-e2e-db.py:/app/deploy/e2e/prepare-e2e-db.py:ro
+      - e2e_spool:/var/lib/daq_navi/spool
+    depends_on:
+      pg:
+        condition: service_healthy
+      influx:
+        condition: service_healthy
+      mqtt:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8081/api/health', timeout=3)\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  pg:
+    image: timescale/timescaledb:latest-pg16
+    environment:
+      POSTGRES_DB: daq_navi_test_local
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: testpass
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U admin -d daq_navi_test_local"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  influx:
+    image: influxdb:2.7
+    environment:
+      DOCKER_INFLUXDB_INIT_MODE: setup
+      DOCKER_INFLUXDB_INIT_USERNAME: tester
+      DOCKER_INFLUXDB_INIT_PASSWORD: testpass
+      DOCKER_INFLUXDB_INIT_ORG: mddp
+      DOCKER_INFLUXDB_INIT_BUCKET: daq_telemetry
+      DOCKER_INFLUXDB_INIT_ADMIN_TOKEN: local-test-token
+    volumes:
+      - influx_data:/var/lib/influxdb2
+      - influx_config:/etc/influxdb2
+    healthcheck:
+      test: ["CMD", "influx", "ping", "--host", "http://localhost:8086"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  mqtt:
+    image: eclipse-mosquitto:2
+    command: ["/bin/sh", "-c", "if [ -f /mosquitto/data/passwordfile ]; then mosquitto_passwd -b /mosquitto/data/passwordfile tester testpass; else mosquitto_passwd -c -b /mosquitto/data/passwordfile tester testpass; fi && chown mosquitto:mosquitto /mosquitto/data/passwordfile && exec mosquitto -c /mosquitto/config/mosquitto.conf"]
+    volumes:
+      - ./mqtt/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - ./mqtt/ca.crt:/mosquitto/config/ca.crt:ro
+      - ./mqtt/server.crt:/mosquitto/config/server.crt:ro
+      - ./mqtt/server.key:/mosquitto/config/server.key:ro
+      - mqtt_data:/mosquitto/data
+
+volumes:
+  e2e_spool:
+  pg_data:
+  influx_data:
+  influx_config:
+  mqtt_data:
