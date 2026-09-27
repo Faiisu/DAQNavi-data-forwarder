@@ -415,9 +415,9 @@ else
   warn "Advantech DAQNavi driver was NOT detected on this machine."
   say "Advantech DAQNavi Linux Driver installation options:"
   step "1. Download the official Advantech DAQNavi Linux Drivers SDK package:"
-  note "   https://www.advantech.com/en/support/details/driver?id=1-13E0I2"
+  note "   https://www.advantech.com/emt/support/details/driver?id=1-LXHFQJ"
   if confirm "Open Advantech driver support page in browser?"; then
-    open_url "https://www.advantech.com/en/support/details/driver?id=1-13E0I2"
+    open_url "https://www.advantech.com/emt/support/details/driver?id=1-LXHFQJ"
   fi
   step "2. Install driver package depending on package type:"
   note "   • Debian/Ubuntu (.deb) : sudo dpkg -i daqnavi_*.deb"

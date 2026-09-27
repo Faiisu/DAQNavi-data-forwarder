@@ -1,3 +1,3 @@
 # Third-party source and distribution inventory
 
-Identify the origin and stated redistribution terms of material bundled with the project, starting with `references/advantech_sdk/` and the PCI-1716 manual under `docs/hardware/`. Keep ownership statements for project-original work separate from third-party material. Record uncertainty where the available evidence does not establish permission.
+Refer to Advantech's official web pages for DAQNavi software, libraries, and hardware manuals. Do not bundle copies of vendor examples, libraries, or manuals in this repository. Keep project-authored hardware notes clearly attributed and linked to official sources.

@@ -139,7 +139,7 @@ DAQ mockup acquisition generates synthetic values and uses its configured destin
 |:---|:---|
 | `docker-compose.yml`, `deploy/daq-navi/`, `deploy/portal/` | Infrastructure and independent DAQ/Portal Compose projects. |
 | `services/portal/` | Static Portal frontend and its service-link configuration. |
-| `references/advantech_sdk/`, `docs/hardware/` | Vendor examples and hardware references; see the [third-party provenance inventory](docs/third-party-provenance.md) for notices and redistribution status. |
+| `docs/hardware/` | Project hardware notes that link to Advantech's official manuals. Obtain DAQNavi software and libraries from [Advantech Support](https://www.advantech.com/emt/support/details/driver?id=1-LXHFQJ); see the [third-party provenance inventory](docs/third-party-provenance.md). |
 | `services/daq_navi/web/` | Config Center, REST API, and process control. |
 | `services/daq_navi/core/` | DAQ configuration loading, physical capture, spool, writer, and mockup acquisition. |
 | `services/musashi_ii/`, `services/musashi_iv/` | Independent dispenser ingestion services. |
