@@ -1,3 +1,0 @@
-# Use the DAQNavi host clock as the DAQ time authority
-
-The DAQNavi host clock is the wall-clock authority for production sample timestamps; the selected database or MQTT broker may run on a separate host and does not set sample time. DAQNavi derives timestamps from sample position and the configured acquisition rate, then uses reliable read timing to make bounded alignment adjustments. Timestamp qualification checks sample timing and monotonic order on the DAQNavi host and verifies explicit acquisition gaps. Cross-host clock synchronization and shared-event comparison are outside this decision's acceptance criteria.

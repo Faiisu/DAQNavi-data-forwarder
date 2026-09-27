@@ -1,9 +1,0 @@
-{
-  "schema_version": 1,
-  "device_id": "rack/one",
-  "gap_id": "gap-1",
-  "revision": 2,
-  "start_ns": 100,
-  "end_ns": 200,
-  "cause": "broker_outage"
-}

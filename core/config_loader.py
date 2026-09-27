@@ -22,7 +22,12 @@ except ImportError:
     class MockEnum:
         def __init__(self, **kwargs):
             self.__dict__.update(kwargs)
+        @property
+        def __members__(self):
+            return self.__dict__
         def __getattr__(self, name):
+            if name.startswith('__') and name.endswith('__'):
+                raise AttributeError(name)
             return name
 
     AiSignalType = MockEnum(
