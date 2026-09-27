@@ -535,131 +535,6 @@ def _chunk_rows(rows, page_size=1000):
         yield rows[i:i + step]
 
 
-class MQTTClient:
-    """
-    Responsibility: Manage MQTT connection lifecycle and publishing telemetry samples to an MQTT broker.
-    """
-    def __init__(self, broker="localhost", port=1883, topic="daq/telemetry", qos=0, username=None, password=None, tls_enabled=False, ca_certs=None, certfile=None, keyfile=None, stop_event=None, client_id="daq_publisher"):
-        self.broker = broker
-        self.port = int(port)
-        self.topic = topic
-        self.qos = int(qos)
-        self.username = username
-        self.password = password
-        self.tls_enabled = bool(tls_enabled)
-        self.ca_certs = ca_certs
-        self.certfile = certfile
-        self.keyfile = keyfile
-        self.stop_event = stop_event or threading.Event()
-        self.client_id = client_id
-        self.client = None
-        self.is_connected = False
-
-    def connect(self):
-        try:
-            import paho.mqtt.client as mqtt
-        except ImportError:
-            log.error("paho-mqtt package is not installed. Run 'uv pip install paho-mqtt' to enable MQTT mode.")
-            return False
-
-        while not self.stop_event.is_set():
-            try:
-                try:
-                    self.client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=self.client_id)
-                except (AttributeError, TypeError):
-                    self.client = mqtt.Client(client_id=self.client_id)
-
-                if self.username:
-                    self.client.username_pw_set(self.username, self.password or None)
-
-                if self.tls_enabled:
-                    ca = self.ca_certs if (self.ca_certs and os.path.exists(self.ca_certs)) else None
-                    cert = self.certfile if (self.certfile and os.path.exists(self.certfile)) else None
-                    key = self.keyfile if (self.keyfile and os.path.exists(self.keyfile)) else None
-                    self.client.tls_set(ca_certs=ca, certfile=cert, keyfile=key)
-
-                def on_connect(client, userdata, *args, **kwargs):
-                    rc = args[1] if len(args) > 1 else args[0] if args else 0
-                    if rc == 0 or rc == getattr(mqtt, "MQTT_ERR_SUCCESS", 0):
-                        self.is_connected = True
-                        log.info(f"Connected to MQTT broker at {self.broker}:{self.port}")
-                    else:
-                        self.is_connected = False
-                        log.error(f"MQTT connection failed with code {rc}")
-
-                def on_disconnect(client, userdata, *args, **kwargs):
-                    self.is_connected = False
-                    log.warning("Disconnected from MQTT broker")
-
-                self.client.on_connect = on_connect
-                self.client.on_disconnect = on_disconnect
-                self.client.connect(self.broker, int(self.port), keepalive=60)
-                self.client.loop_start()
-
-                for _ in range(30):
-                    if self.is_connected:
-                        return True
-                    if self.stop_event.is_set():
-                        return False
-                    time.sleep(0.1)
-
-                log.warning(f"MQTT connect timeout ({self.broker}:{self.port}) — retrying in 5s")
-                self.disconnect()
-            except Exception as e:
-                log.error(f"MQTT connection error: {e} — retrying in 5s")
-
-            for _ in range(50):
-                if self.stop_event.is_set():
-                    return False
-                time.sleep(0.1)
-        return False
-
-    def send_samples(self, rows, page_size=1000):
-        if not self.client or not self.is_connected:
-            raise RuntimeError("Not connected to MQTT broker")
-        if not rows:
-            return
-
-        for chunk in _chunk_rows(rows, page_size):
-            payload_data = []
-            for r in chunk:
-                ts = r[0].isoformat() if hasattr(r[0], "isoformat") else str(r[0])
-                if len(r) == 3:
-                    dev_id = self.client_id
-                    ch = int(r[1])
-                    val = float(r[2])
-                elif len(r) >= 4:
-                    dev_id = str(r[1])
-                    ch = int(r[2])
-                    val = float(r[3])
-                else:
-                    raise ValueError(f"Unsupported row format: {r}")
-                payload_data.append({
-                    "time": ts,
-                    "device_id": dev_id,
-                    "channel": ch,
-                    "value": val
-                })
-            payload_json = json.dumps(payload_data)
-            info = self.client.publish(self.topic, payload_json, qos=int(self.qos))
-            if hasattr(info, "rc") and info.rc != 0:
-                raise RuntimeError(f"MQTT publish failed with error code {info.rc}")
-
-    def rollback(self):
-        pass
-
-    def disconnect(self):
-        if self.client:
-            try:
-                self.client.loop_stop()
-                self.client.disconnect()
-            except Exception:
-                pass
-            self.client = None
-        self.is_connected = False
-        log.info("Disconnected from MQTT broker.")
-
-
 class InfluxDBClient:
     """
     Responsibility: Manage InfluxDB HTTP Line Protocol telemetry writes.
@@ -759,25 +634,10 @@ class InfluxDBClient:
 def create_destination_client(cfg, stop_event=None):
     """
     Factory function to instantiate the active destination client based on config.DESTINATION.
-    Supports 'postgresql' (TimescaleDBClient), 'mqtt' (MQTTClient), and 'influxdb' (InfluxDBClient).
+    Supports PostgreSQL/TimescaleDB and InfluxDB mockup destinations.
     """
     dest = getattr(cfg, 'DESTINATION', 'postgresql').lower()
-    if dest == 'mqtt':
-        return MQTTClient(
-            broker=getattr(cfg, 'MQTT_BROKER', 'localhost'),
-            port=getattr(cfg, 'MQTT_PORT', 1883),
-            topic=getattr(cfg, 'MQTT_TOPIC', 'daq/telemetry'),
-            qos=getattr(cfg, 'MQTT_QOS', 0),
-            username=getattr(cfg, 'MQTT_USERNAME', None),
-            password=getattr(cfg, 'MQTT_PASSWORD', None),
-            tls_enabled=getattr(cfg, 'MQTT_TLS_ENABLED', False),
-            ca_certs=getattr(cfg, 'MQTT_CA_CERTS', None),
-            certfile=getattr(cfg, 'MQTT_CLIENT_CERT', None),
-            keyfile=getattr(cfg, 'MQTT_CLIENT_KEY', None),
-            stop_event=stop_event,
-            client_id=getattr(cfg, 'MQTT_CLIENT_ID', 'daq_publisher')
-        )
-    elif dest == 'influxdb':
+    if dest == 'influxdb':
         return InfluxDBClient(
             url=getattr(cfg, 'INFLUX_URL', 'http://localhost:8086'),
             token=getattr(cfg, 'INFLUX_TOKEN', ''),
@@ -786,7 +646,7 @@ def create_destination_client(cfg, stop_event=None):
             measurement=getattr(cfg, 'INFLUX_MEASUREMENT', 'daq_telemetry'),
             stop_event=stop_event
         )
-    else:
+    elif dest in ('postgresql', 'timescaledb', 'database'):
         dsn = getattr(cfg, 'DB_DSN', None) or f"postgresql://{getattr(cfg, 'DB_USER', 'postgres')}:{getattr(cfg, 'DB_PASSWORD', '')}@{getattr(cfg, 'DB_HOST', 'localhost')}:{getattr(cfg, 'DB_PORT', 5432)}/{getattr(cfg, 'DB_NAME', 'daq_telemetry')}"
         return TimescaleDBClient(
             dsn=dsn,
@@ -796,13 +656,13 @@ def create_destination_client(cfg, stop_event=None):
             retention_days=getattr(cfg, 'DB_RETENTION_DAYS', 90),
             compression_interval=getattr(cfg, 'DB_COMPRESSION_INTERVAL', '1 hour')
         )
+    raise ValueError(f"Unsupported mockup destination: {dest}")
 
 
 # ─── Data Writer Thread ───────────────────────────────────────────────────────
 def db_writer_thread():
     """
-    Responsibility: dequeue raw batches, delegate parsing, delegate writing/publishing.
-    Supports TimescaleDB, InfluxDB, and MQTT publishing based on config.DESTINATION.
+    Responsibility: dequeue raw batches, delegate parsing, and write to a mockup database.
     Non-daemon thread — will flush remaining queue items before process exits.
     """
     calibrator = Calibrator(
@@ -950,11 +810,7 @@ def main():
     log.info(f"  Clock rate  : {config.CLOCK_RATE} Hz")
     log.info(f"  sectionLength: {config.SECTION_LENGTH} samples/ch")
     log.info(f"  Batch size  : {config.USER_BUFFER_SIZE} interleaved samples (~{config.SECTION_LENGTH / config.CLOCK_RATE * 1000:.0f}ms)")
-    if dest == 'mqtt':
-        log.info(f"  MQTT Broker : {getattr(config, 'MQTT_BROKER', 'localhost')}:{getattr(config, 'MQTT_PORT', 1883)}")
-        log.info(f"  MQTT Topic  : {getattr(config, 'MQTT_TOPIC', 'daq/telemetry')}")
-    else:
-        log.info(f"  DB DSN      : {config.DB_DSN}")
+    log.info(f"  DB DSN      : {config.DB_DSN}")
     log.info("=" * 60)
 
     daq_thread = threading.Thread(

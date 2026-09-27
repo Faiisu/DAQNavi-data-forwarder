@@ -3,37 +3,41 @@
 ```mermaid
 sequenceDiagram
     actor Operator
-    participant Web as DAQ Navi UI/API
-    participant Process as Acquisition process
+    participant Web as DAQNavi Config Center / API
+    participant Capture as Acquisition process
     participant DAQ as Advantech device
-    participant Spool as SQLite spool
+    participant Spool as Persistent SQLite spool
     participant Writer as Destination writer
-    participant Dest as Destination (TimescaleDB / InfluxDB)
+    participant Dest as PostgreSQL / InfluxDB / MQTT broker
+    participant Consumer as External MQTT consumer
 
-    Operator->>Web: Start production acquisition
-    Web->>Process: Launch with saved configuration
-    Process->>DAQ: Prepare and start waveform input
+    Operator->>Web: Save configuration and start production
+    Web->>Capture: Launch with saved configuration
+    Capture->>DAQ: Prepare and start waveform input
     loop Each acquired section
-        Process->>DAQ: Read configured channel span
-        DAQ-->>Process: Raw voltage values
-        Process->>Process: Timestamp and calibrate samples
-        Process->>Spool: Append compressed batch and commit
+        Capture->>DAQ: Read configured channel span
+        DAQ-->>Capture: Raw voltage values
+        Capture->>Capture: Timestamp, identify, and calibrate samples
+        Capture->>Spool: Commit sample batch and pending gaps
     end
-    loop Pending batches
-        Writer->>Spool: Read oldest pending batch
-        Spool-->>Writer: Batch records
-        Writer->>Dest: Deliver production samples
-        alt Destination write succeeds
-            Dest-->>Writer: Success response
-            Writer->>Spool: Acknowledge batch
-        else Destination unavailable/write fails
-            Dest-->>Writer: Error
-            Note over Writer,Spool: Keep pending batch for retry, within spool capacity
+    loop Pending records
+        Writer->>Spool: Read oldest pending records
+        Spool-->>Writer: Samples and gap revisions
+        Writer->>Dest: Write rows or publish JSON v1 messages
+        alt Destination confirms completion
+            Dest-->>Writer: Write success or MQTT QoS completion
+            Writer->>Spool: Acknowledge completed records
+        else Destination unavailable or timeout
+            Dest-->>Writer: Error or no completion
+            Note over Writer,Spool: Keep records pending for retry under the latest saved configuration
         end
     end
-    Process-->>Web: Runtime status
-    Web->>Dest: Query recent samples or retention policy
-    Dest-->>Web: Query result
+    opt MQTT destination
+        Dest-->>Consumer: Per-device samples and gap topics
+        Note over Consumer: Consumer owns deduplication, history, retention, and downstream health
+    end
+    Web->>Spool: Read acquisition, spool, gaps, and delivery state
+    Web->>Dest: Query recent samples or retention when database destination is selected
 ```
 
-The exact start and stop behavior depends on the saved configuration and process state. Acquisition gaps are persisted separately; status and sample APIs expose runtime/database information but are not a substitute for checking that expected rows are arriving at the destination.
+MQTT QoS completion is defined in the [JSON v1 contract](../../contracts/production-mqtt-contract-v1.md). Pending-record routing and cutover behavior are defined in the [production data flow](../data-flow.md). `/api/samples` does not query local database history while MQTT is selected.

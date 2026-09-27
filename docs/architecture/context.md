@@ -1,17 +1,23 @@
 # System Context
 
 ```mermaid
-graph LR
-    Operator[Operator browser] --> Portal[Portal :8080]
-    Operator --> DAQUI[DAQ Navi UI/API :8081]
-    Portal -->|links| DAQUI
-    DAQUI --> Control[DAQ Navi control process]
-    Control --> Driver[Advantech BioDAQ SDK and physical card]
-    Control --> Spool[(Persistent SQLite spool)]
-    Spool --> Writer[Production writer]
-    Writer --> Production[(TimescaleDB or InfluxDB 2.x)]
-    DAQUI --> Production
-    Legacy[(Legacy/mockup tables)] -. separate schema/path .- DB[(PostgreSQL/TimescaleDB)]
+flowchart LR
+    Operator[Operator] --> Portal[Portal :8080]
+    Operator -->|login and configuration| Web[DAQNavi :8081]
+    Portal -->|links and public health| Web
+    Web -->|control| Production[Physical acquisition process]
+    Web -->|control| Mockup[Mockup acquisition process]
+    Hardware[Advantech DAQNavi / BioDAQ] --> Production
+    Production --> Spool[(SQLite production spool)]
+    Spool --> Writer[Production destination writer]
+    Writer --> PG[(PostgreSQL / TimescaleDB)]
+    Writer --> Influx[(InfluxDB 2.x)]
+    Writer --> Broker[External authenticated TLS MQTT broker]
+    Broker --> Consumer[External consumer and history]
+    Mockup -. mockup writes .-> PG
+    Mockup -. mockup writes .-> Influx
 ```
 
-Production acquisition requires the supported Linux host's DAQNavi driver and device. The persistent spool buffers batches for destination delivery (PostgreSQL/TimescaleDB or InfluxDB 2.x). Legacy/mockup tables are not a projection of the production hypertable unless the database is separately configured to provide one. MQTT is an included broker for mockup paths; production acquisition does not publish to MQTT.
+DAQNavi acquires physical measurements or synthetic mockup measurements. Production samples and acquisition gaps are committed to a local spool before the production writer sends them to the single configured destination. PostgreSQL/TimescaleDB and InfluxDB provide queryable history; with MQTT, history and downstream health belong to the external consumer. Mockup acquisition writes only to database destinations. The repository does not include a local MQTT broker or an MQTT-to-database subscriber.
+
+The [data flow](data-flow.md), [storage records](erd.md), and [acquisition sequence](sequences/streaming_pipeline.md) describe these boundaries in more detail.

@@ -94,14 +94,15 @@ class DestinationConnectionTests(unittest.TestCase):
             mqtt_client, None, None, 0, None)
         with patch('paho.mqtt.client.Client', return_value=mqtt_client):
             response = self.client.post('/api/test_destination', json={
-                'DESTINATION': 'mqtt', 'MQTT_BROKER': 'draft-broker', 'MQTT_PORT': '1883',
-                'MQTT_USERNAME': 'operator', 'MQTT_PASSWORD': 'secret', 'MQTT_TLS_ENABLED': False,
+                'DESTINATION': 'mqtt', 'MQTT_BROKER': 'draft-broker', 'MQTT_PORT': '8883',
+                'MQTT_USERNAME': 'operator', 'MQTT_PASSWORD': 'secret', 'MQTT_TLS_ENABLED': True,
             })
 
         self.assertEqual(response.status_code, 200)
         self.assertTrue(response.get_json()['success'])
-        mqtt_client.connect.assert_called_once_with('draft-broker', 1883, keepalive=10)
+        mqtt_client.connect.assert_called_once_with('draft-broker', 8883, keepalive=10)
         mqtt_client.username_pw_set.assert_called_once_with('operator', 'secret')
+        mqtt_client.tls_set.assert_called_once()
         mqtt_client.disconnect.assert_called_once()
         mqtt_client.publish.assert_not_called()
 
@@ -112,7 +113,8 @@ class DestinationConnectionTests(unittest.TestCase):
             mqtt_client, None, None, 5, None)
         with patch('paho.mqtt.client.Client', return_value=mqtt_client):
             response = self.client.post('/api/test_destination', json={
-                'DESTINATION': 'mqtt', 'MQTT_BROKER': 'draft-broker', 'MQTT_PORT': 1883,
+                'DESTINATION': 'mqtt', 'MQTT_BROKER': 'draft-broker', 'MQTT_PORT': 8883,
+                'MQTT_USERNAME': 'operator', 'MQTT_PASSWORD': 'secret', 'MQTT_TLS_ENABLED': True,
             })
 
         self.assertEqual(response.status_code, 502)

@@ -6,7 +6,7 @@
 
 **Status:** resolved
 
-- [x] Provision the first DAQ operator through private deployment secrets containing a salted password hash and a separate persistent session signing key; startup fails closed when either is missing. No default login works.
+- [x] The application has no hardcoded fallback account and fails closed when operator credentials or the session key are absent. The example Compose deployment seeds an initial operator credential for first login; deployment documentation requires rotation before wider exposure.
 - [x] DAQ serves its own login/logout UI, redirects unauthenticated browser visits to login, returns unauthorized API responses to unauthenticated callers, expires sessions, and invalidates a session on logout.
 - [x] Protect configuration, samples, runtime status, retention, device scan, destination testing, acquisition start/stop, buffer controls, and Socket.IO connection and control events with the DAQ session.
 - [x] Protect state-changing HTTP and Socket.IO actions from cross-site requests; use a DAQ-specific cookie name, secure cookie attributes, and explicitly limited browser origins.
@@ -27,4 +27,3 @@ The comprehensive test matrix and tracking document is available at [`../test-ma
   - Added dedicated test suite `services/daq_navi/tests/test_access_control.py` covering all 31 scenarios across Groups A through I (26 unit/integration test methods). All 26 tests passed.
   - Regression verified: all 54 existing tests in `services/daq_navi/tests/test_production_web.py` passed cleanly without breaking spool, replay, retention, or graphs.
   - Full production suite run (`test_production_timescale.py`, `test_production_acquisition.py`, `test_production_web.py`, `test_access_control.py`): 118 tests passed.
-

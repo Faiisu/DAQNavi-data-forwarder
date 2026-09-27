@@ -1,0 +1,5 @@
+# Production MQTT delivery boundary
+
+Status: accepted
+
+MQTT will be a selectable production destination alongside TimescaleDB and InfluxDB, with one destination active per run. Operators may choose QoS 0 or QoS 1, with QoS 1 as the production default. At QoS 0, the local spool acknowledges a source batch after the MQTT client's `on_publish` callback reports that every message in the batch left the client; the broker does not acknowledge receipt, so loss remains possible. At QoS 1, the spool acknowledges the batch only after every message receives the broker's PUBACK. The existing local-spool capacity target of at least 24 hours also applies while the MQTT broker is unavailable. The broker is external and requires authentication and TLS; an external consumer owns downstream processing and storage. This boundary preserves the existing single-destination spool model while letting operators choose lower latency or broker-confirmed delivery. QoS 1 can deliver duplicates, so messages must carry stable identities for consumer deduplication.

@@ -74,70 +74,58 @@ class ProductionWebTests(unittest.TestCase):
         self.assertIn('r.provenance == "physical_daq"', query)
         self.assertIn('r.device_id == "test-device"', query)
 
-    def test_destination_switch_drains_old_spool_before_rebinding(self):
+    def test_destination_switch_keeps_pending_spool_for_new_destination(self):
         old = dict(self.config, DESTINATION='postgresql', SPOOL_DIR=self.directory.name)
-        new = dict(old, DESTINATION='influxdb')
         spool = web.DurableSpool(Path(self.directory.name), old['SPOOL_MAX_BYTES'])
         spool.append('batch', [{'sample_id': 's', 'time_ns': 100}])
         gap_id = spool.open_gap(50, 'requested_stop')
         spool.close()
-        with patch.object(web.TimescaleProductionDestination, 'write') as write:
-            web.drain_spool_for_destination_switch(old, new)
-        rows, gaps = write.call_args.args
-        self.assertEqual(rows[0]['sample_id'], 's')
-        self.assertEqual(gaps[0]['gap_id'], gap_id)
+        with patch.object(web, 'get_running_process', return_value=(None, None)), \
+             patch.object(web, '_test_destination', return_value='ok'), \
+             patch.object(web.TimescaleProductionDestination, 'write') as old_write:
+            response = self.client.post('/api/config', json={'DESTINATION': 'influxdb'})
+        self.assertEqual(response.status_code, 200, response.get_json())
+        old_write.assert_not_called()
         reopened = web.DurableSpool(Path(self.directory.name), old['SPOOL_MAX_BYTES'])
-        self.assertIsNone(reopened.state_value('destination'))
-        self.assertEqual(reopened.pending_batches, 0)
-        self.assertEqual(reopened.pending_gaps(), [])
-        reopened.close()
-
-    def test_destination_switch_write_failure_keeps_old_spool_pending(self):
-        old = dict(self.config, DESTINATION='postgresql', SPOOL_DIR=self.directory.name)
-        new = dict(old, DESTINATION='influxdb')
-        spool = web.DurableSpool(Path(self.directory.name), old['SPOOL_MAX_BYTES'])
-        spool.set_state('destination', 'postgresql')
-        spool.append('batch', [{'sample_id': 's', 'time_ns': 100}])
-        spool.open_gap(50, 'requested_stop')
-        spool.close()
-        with patch.object(web.TimescaleProductionDestination, 'write', side_effect=OSError('offline')):
-            with self.assertRaisesRegex(OSError, 'offline'):
-                web.drain_spool_for_destination_switch(old, new)
-        reopened = web.DurableSpool(Path(self.directory.name), old['SPOOL_MAX_BYTES'])
-        self.assertEqual(reopened.state_value('destination'), 'postgresql')
         self.assertEqual(reopened.pending_batches, 1)
-        self.assertEqual(len(reopened.pending_gaps()), 1)
+        self.assertEqual(reopened.oldest()[1][0]['sample_id'], 's')
+        self.assertEqual(reopened.pending_gaps()[0]['gap_id'], gap_id)
         reopened.close()
 
     def test_destination_switch_saves_then_restarts_running_acquisition(self):
         with patch.object(web, 'get_running_process', side_effect=[(123, 'production'), (None, None)]), \
              patch.object(web, '_test_destination', return_value='ok'), \
              patch.object(web, 'stop_acquisition', return_value={'stopped': True}), \
-             patch.object(web, 'drain_spool_for_destination_switch'), \
              patch.object(web, 'start_acquisition', return_value={'started': True}) as start:
             response = self.client.post('/api/config', json={'DESTINATION': 'influxdb'})
         self.assertEqual(response.status_code, 200, response.get_json())
         self.assertEqual(self.client.get('/api/config').get_json()['DESTINATION'], 'influxdb')
         start.assert_called_once_with('production')
 
-    def test_same_backend_target_change_drains_but_token_rotation_does_not(self):
+    def test_same_backend_target_change_saves_with_pending_records(self):
+        spool = web.DurableSpool(Path(self.directory.name), self.config['SPOOL_MAX_BYTES'])
+        spool.append('pending', [{'sample_id': 's', 'time_ns': 100}])
+        spool.close()
         with patch.object(web, 'get_running_process', return_value=(None, None)), \
              patch.object(web, '_test_destination', return_value='ok'), \
              patch.object(web, 'effective_timescale_retention', return_value='30 days'), \
-             patch.object(web, 'drain_spool_for_destination_switch') as drain:
+             patch.object(web.TimescaleProductionDestination, 'write') as old_write:
             response = self.client.post('/api/config', json={'DB_DSN': 'postgresql://other-host/testdb'})
         self.assertEqual(response.status_code, 200, response.get_json())
-        drain.assert_called_once()
+        old_write.assert_not_called()
+        spool = web.DurableSpool(Path(self.directory.name), self.config['SPOOL_MAX_BYTES'])
+        self.assertEqual(spool.pending_batches, 1)
+        spool.close()
 
         influx_config = dict(self.config, DESTINATION='influxdb', INFLUX_URL='http://influx.test:8086',
                              INFLUX_ORG='org', INFLUX_BUCKET='bucket', INFLUX_TOKEN='old-token',
                              INFLUX_MEASUREMENT='daq_telemetry')
         self.path.write_text(json.dumps(influx_config), encoding='utf-8')
         with patch.object(web, 'get_running_process', return_value=(None, None)), \
-             patch.object(web, 'drain_spool_for_destination_switch') as drain:
+             patch.object(web.InfluxProductionDestination, 'write') as old_write:
             rotated = self.client.post('/api/config', json={'INFLUX_TOKEN': 'new-token'})
         self.assertEqual(rotated.status_code, 200, rotated.get_json())
-        drain.assert_not_called()
+        old_write.assert_not_called()
 
     def test_config_rejects_spool_directory_change(self):
         original = self.path.read_text(encoding='utf-8')
@@ -146,7 +134,7 @@ class ProductionWebTests(unittest.TestCase):
         self.assertIn('SPOOL_DIR changes are unsupported', response.get_json()['message'])
         self.assertEqual(self.path.read_text(encoding='utf-8'), original)
 
-    def test_switch_refuses_to_drain_when_saved_config_disagrees_with_spool_owner(self):
+    def test_switch_uses_saved_config_even_when_spool_has_old_owner_metadata(self):
         old = dict(self.config, DESTINATION='influxdb', SPOOL_DIR=self.directory.name,
                    INFLUX_URL='http://influx.test:8086', INFLUX_ORG='org',
                    INFLUX_BUCKET='current-bucket', INFLUX_TOKEN='token',
@@ -158,10 +146,13 @@ class ProductionWebTests(unittest.TestCase):
             web.DaqNaviConfig(old, allow_env_overrides=False)))
         spool.append('pending', [{'sample_id': 's', 'time_ns': 100}])
         spool.close()
-        with patch.object(web.InfluxProductionDestination, 'write') as write:
-            with self.assertRaisesRegex(web.AcquisitionFault, 'identity does not match'):
-                web.drain_spool_for_destination_switch(changed, dict(changed, INFLUX_BUCKET='next-bucket'))
-        write.assert_not_called()
+        self.path.write_text(json.dumps(changed), encoding='utf-8')
+        with patch.object(web, 'get_running_process', return_value=(None, None)), \
+             patch.object(web, '_test_destination', return_value='ok'), \
+             patch.object(web.InfluxProductionDestination, 'write') as old_write:
+            response = self.client.post('/api/config', json={'INFLUX_BUCKET': 'next-bucket'})
+        self.assertEqual(response.status_code, 200, response.get_json())
+        old_write.assert_not_called()
         reopened = web.DurableSpool(Path(self.directory.name), old['SPOOL_MAX_BYTES'])
         self.assertEqual(reopened.pending_batches, 1)
         reopened.close()

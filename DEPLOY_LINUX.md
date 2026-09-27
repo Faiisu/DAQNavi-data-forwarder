@@ -1,12 +1,10 @@
-# Linux Deployment Guide
+# Linux deployment and operations
 
-Linux is the only supported deployment host for these Compose projects. The DAQ service mounts Linux host device files and Advantech libraries into its container. Physical acquisition also requires the supported Advantech BioDAQ SDK, driver, hardware, and configuration on that host. Windows deployment is not supported.
+Linux is the supported deployment host. Physical DAQ use requires a supported Advantech DAQNavi/BioDAQ driver, SDK libraries, and card installed on the host. Docker does not provide the vendor driver.
 
 ## Prepare
 
-- Install Docker Engine and the Docker Compose plugin.
-- For physical acquisition, install and configure the Advantech DAQNavi/BioDAQ driver on the host and confirm the device is visible there.
-- Clone the repository, then prepare environment settings:
+Install Docker Engine and the Compose plugin, then create private environment and DAQ configuration files:
 
 ```bash
 cp .env.example .env
@@ -16,43 +14,51 @@ mkdir -p deploy/daq-navi/config
 cp services/daq_navi/config.json deploy/daq-navi/config/config.json
 ```
 
-Edit the root `.env` for TimescaleDB, Mosquitto, and InfluxDB; replace all demo credentials and tokens. The two files under `deploy/` set DAQ and Portal host ports independently. Portal links and polling ports live in `services/portal/config.json`; update its `daq` entry when changing `DAQ_PORT`. Review the private `deploy/daq-navi/config/config.json` for the device, channel span, signal types, input ranges, calibration, and destination. Its saved `DB_DSN` must match the database credentials in the root `.env` and use host `timescaledb` for this Docker network. For InfluxDB, use host `influxdb` on this Docker network, with the organization, bucket, and token from the infrastructure installation. The checked-in values may not match the installed hardware. The private DAQ config directory is ignored by Git and mounted at `/app/config`; atomic saves replace `config.json` inside that directory.
+Replace example infrastructure credentials in the root `.env`. Review `deploy/daq-navi/config/config.json` for the physical device, channel span, signal type, input range, calibration, destination, and startup settings. For PostgreSQL/TimescaleDB use host `timescaledb` on the Compose network and a DSN matching the root `.env`. For InfluxDB use host `influxdb` and its configured organization, bucket, and token. MQTT connects to an external broker and requires a host, port, username, password, verified TLS, and a topic prefix; the root Compose project does not run a broker. Keep all private settings out of Git.
 
-## Start and operate
+Replace the example `DAQ_SESSION_KEY` in `deploy/daq-navi/.env` with a private random value and restrict the file's permissions. The shipped operator hash is a starter credential documented below; rotate the password after first login.
 
-The root Compose project starts only TimescaleDB, Mosquitto, and InfluxDB. DAQ Navi and Portal have independent Compose projects. Create the DAQ spool volume once on a new host; an existing volume with this name is reused.
+The DAQNavi config directory is bind-mounted at `/app/config`. Atomic config saves replace `config.json` in that directory. The production SQLite spool is a separate persistent Docker volume named `iiot-data-ingest_daq_spool`.
+
+## First operator login
+
+On a fresh deployment using `deploy/daq-navi/.env.example`, sign in with username `admin` and password `00000000`. Change the password from the operator menu immediately. The new password must contain at least 8 characters. Keep the service on a trusted network while the default is active. A hash saved in the spool takes precedence over environment settings, so an existing installation can have a different password.
+
+## Start the stack
+
+Start infrastructure, DAQNavi, and Portal separately:
 
 ```bash
 docker compose -f docker-compose.yml up -d
 docker volume create iiot-data-ingest_daq_spool
 docker compose --env-file deploy/daq-navi/.env -f deploy/daq-navi/compose.yml up -d --build
 docker compose --env-file deploy/portal/.env -f deploy/portal/compose.yml up -d
-docker compose ps
+docker compose -f docker-compose.yml ps
 docker compose --env-file deploy/daq-navi/.env -f deploy/daq-navi/compose.yml ps
 docker compose --env-file deploy/portal/.env -f deploy/portal/compose.yml ps
 curl http://localhost:8081/api/health
 ```
 
-Use the Portal at `http://localhost:8080` and DAQ Config Center at `http://localhost:8081`; DAQ APIs use the same port. To use development source mounts and Flask debugging, add the DAQ override:
+Open the Portal at `http://<host>:8080` and DAQNavi at `http://<host>:8081`. DAQNavi `/api/health` is public and minimal; the Config Center and other DAQNavi APIs require an operator session. Read detailed runtime state in the Config Center after login. `/api/status` and `/api/samples` return `401` without a session.
 
-```bash
-docker compose --env-file deploy/daq-navi/.env -f deploy/daq-navi/compose.yml -f deploy/daq-navi/compose.dev.yml up -d --build
-```
+Before starting physical acquisition, scan for the DAQ card, check wiring and channel settings, test the selected destination, save configuration, and explicitly start production acquisition unless the saved auto-start mode is intended. A successful destination test checks connectivity; it does not verify data delivery. Confirm current samples in the selected database or external MQTT consumer.
 
-Manage each project with its own Compose file:
+To follow service logs or inspect lifecycle state:
 
 ```bash
 docker compose --env-file deploy/daq-navi/.env -f deploy/daq-navi/compose.yml logs -f daq-navi
-docker compose --env-file deploy/daq-navi/.env -f deploy/daq-navi/compose.yml restart daq-navi
-docker compose --env-file deploy/portal/.env -f deploy/portal/compose.yml restart portal
-docker compose -f docker-compose.yml ps
+docker compose --env-file deploy/daq-navi/.env -f deploy/daq-navi/compose.yml ps
 ```
 
-Stopping DAQ or Portal this way does not stop the infrastructure project. The DAQ spool is an external volume in its Compose file, so DAQ project removal does not delete it. Avoid `down -v` on the infrastructure project when preserving database volumes.
+DAQNavi and Portal have independent Compose projects. Stopping either does not stop the infrastructure project. Do not use `docker compose down -v` if database or spool data must be retained.
 
-### Migrate an existing private DAQ config mount
+## Destination behavior
 
-The DAQ project now bind mounts `deploy/daq-navi/config/` as a directory. On an existing installation, stop acquisition through Config Center and check pending batches. Preserve the current file and the external spool volume. Copy the old file into the new directory, keep it private, and compare the copy before recreating the container:
+The [production data flow](docs/architecture/data-flow.md) is authoritative for spool delivery and destination changes. See the [MQTT JSON v1 contract](docs/contracts/production-mqtt-contract-v1.md) for MQTT-specific configuration and consumer behavior.
+
+## Existing installations
+
+For an existing combined-stack installation, stop acquisition through the Config Center, inspect pending batches, preserve the spool volume, and migrate the private config before starting the independent DAQNavi project. On hosts where the old config was a file mount:
 
 ```bash
 mkdir -p deploy/daq-navi/config
@@ -62,39 +68,22 @@ cmp deploy/daq-navi/config.local.json deploy/daq-navi/config/config.json
 docker volume inspect iiot-data-ingest_daq_spool
 ```
 
-If the new container fails its health check, stop that container, change the Compose mount and `DAQ_CONFIG_PATH` back to the previous file mount, then recreate the previous image. Retain both config copies until acquisition, destination, operator authentication, and API readback have been checked. Rollback never deletes or recreates the spool volume.
+Review the current Compose files and config before cutover. Recreate DAQNavi and Portal from their own Compose projects. Do not remove or recreate the spool volume during migration. Check the DAQNavi health endpoint, sign in, inspect acquisition and pending-spool state, and verify samples at the configured destination before retiring previous config copies.
 
-### Cutover from the former combined stack
-
-The old stack used the same project name, container names, infrastructure network, and `iiot-data-ingest_daq_spool` volume. Before starting the independent projects on an existing host, stop acquisition from the DAQ Config Center and check pending batches. Then remove the old DAQ and Portal containers while leaving infrastructure and volumes intact:
+If the former bundled MQTT broker still exists, remove its container after confirming that no remaining service depends on it:
 
 ```bash
-docker compose -f docker-compose.yml up -d --remove-orphans
-docker volume inspect iiot-data-ingest_daq_spool
-docker compose --env-file deploy/daq-navi/.env -f deploy/daq-navi/compose.yml up -d --build
-docker compose --env-file deploy/portal/.env -f deploy/portal/compose.yml up -d
+docker rm -f daq_mosquitto
 ```
 
-`--remove-orphans` removes the old DAQ and Portal containers from the infrastructure project; it does not remove the spool volume. Review the two new Compose configurations and saved DAQ settings before cutover. Do not run this cutover while acquisition is active.
+This removes the legacy broker container only. It does not delete Docker volumes.
 
-## Physical DAQ access
+## Network and authentication
 
-The `daq-navi` service is privileged and mounts `/dev`, `/usr/lib`, `/opt/advantech`, `/etc/biobdaq`, and `/var/lib/daq` from the host. Install the vendor SDK and libraries in those host locations as required by the driver package. Confirm the host OS and installed SDK are supported by Advantech. Docker cannot supply a missing host driver.
+Default ports are Portal `8080`, DAQNavi `8081`, PostgreSQL/TimescaleDB `5432`, and InfluxDB `8086`. Database ports are published by default; restrict them with host firewall or network rules when not needed externally. There is no local MQTT broker port.
 
-Start production acquisition only after checking the saved configuration, signal wiring, channel mode, destination connection, and device scan. The saved `MOCKUP_MODE` and selected mode in the DAQ service control acquisition. Read status after starting and verify samples reach the intended production table.
+DAQNavi protects operator pages, configuration, and control APIs with operator sessions. `/api/health` is intentionally public and minimal. Portal and MUSASHI II/IV interfaces do not include built-in authentication. Keep them on trusted networks or add access control before wider exposure. Use HTTPS through a trusted reverse proxy when credentials or operator sessions cross an untrusted network.
 
-## Services and ports
+## Hardware reference
 
-| Service | Default host port |
-|:---|---:|
-| Portal | 8080 |
-| DAQ Config Center / DAQ Navi API | 8081 |
-| TimescaleDB/PostgreSQL | 5432 |
-| Mosquitto | 1883 |
-| InfluxDB | 8086 |
-
-Infrastructure port mappings are in the root `.env`; DAQ and Portal host ports are in their files under `deploy/`. Database and broker ports are published by default; restrict them with host firewall/network rules when they are not needed by other machines. The DAQ Config Center provides operator authentication when configured; the Portal, MUSASHI II, and MUSASHI IV web interfaces do not provide authentication, so do not expose them to an untrusted network without adding access control.
-
-## Optional host setup helpers
-
-`deploy/linux/install_deps.sh` and `scripts/setup_wizard.sh` are host setup helpers. Inspect the selected script before running it and use only the helper matching your installation. They are not required for a manual `docker compose up` deployment.
+The DAQNavi container mounts host device files and vendor library directories. Consult [PCI-1716 project notes](docs/hardware/PCI-1716.md) and the linked official manual before wiring or selecting signal modes. Obtain current SDK, driver, and library packages from [Advantech Support](https://www.advantech.com/emt/support/details/driver?id=1-LXHFQJ); see the [provenance inventory](docs/third-party-provenance.md).

@@ -1,8 +1,10 @@
 """Standalone production acquisition contract; all data stays in temporary storage."""
 
+import json
 import os
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -96,7 +98,7 @@ class FakeDestination:
         if self.fail:
             raise ConnectionError("database unavailable")
         for row in rows:
-            self.rows[(row["time_ns"], row["sample_id"])] = row
+            self.rows[(row.get("time_ns"), row["sample_id"])] = row
         for gap in gaps:
             self.gaps[gap["gap_id"]] = gap
         if self.uncertain:
@@ -158,19 +160,24 @@ class ProductionAcquisitionTests(unittest.TestCase):
             self.assertEqual(pipeline.pending_batches, 1)
             pipeline.close()
 
-    def test_startup_rejects_pending_spool_owned_by_another_destination(self):
+    def test_startup_replays_pending_spool_to_current_destination(self):
         with tempfile.TemporaryDirectory() as directory:
             spool = DurableSpool(Path(directory), 1024 * 1024)
             spool.set_state('destination', 'postgresql')
             spool.append('old-batch', [{'sample_id': 'old'}])
             spool.close()
             cfg = configuration(DESTINATION='influxdb', INFLUX_TOKEN='test', SPOOL_DIR=directory)
-            factory = MagicMock()
-            with self.assertRaisesRegex(AcquisitionFault, 'records for postgresql'):
-                run_production(cfg, daq_factory=factory, spool_dir=directory)
-            factory.assert_not_called()
+            destination = FakeDestination()
+            stopped = threading.Event()
+            stopped.set()
+            run_production(cfg, stop_event=stopped, destination=destination,
+                           daq_factory=lambda _: FakeDaq([]), spool_dir=directory)
+            self.assertEqual(destination.rows[(None, 'old')]['sample_id'], 'old')
+            reopened = DurableSpool(Path(directory), cfg.SPOOL_MAX_BYTES)
+            self.assertEqual(reopened.pending_batches, 0)
+            reopened.close()
 
-    def test_startup_rejects_same_type_spool_target_identity_change(self):
+    def test_startup_replays_pending_spool_after_target_change(self):
         with tempfile.TemporaryDirectory() as directory:
             spool = DurableSpool(Path(directory), 1024 * 1024)
             old_cfg = configuration(DESTINATION='influxdb', INFLUX_TOKEN='old-token',
@@ -182,8 +189,12 @@ class ProductionAcquisitionTests(unittest.TestCase):
             spool.close()
             new_cfg = configuration(DESTINATION='influxdb', INFLUX_TOKEN='new-token',
                                     INFLUX_BUCKET='new-bucket', SPOOL_DIR=directory)
-            with self.assertRaisesRegex(AcquisitionFault, 'different destination target'):
-                run_production(new_cfg, daq_factory=MagicMock(), spool_dir=directory)
+            destination = FakeDestination()
+            stopped = threading.Event()
+            stopped.set()
+            run_production(new_cfg, stop_event=stopped, destination=destination,
+                           daq_factory=lambda _: FakeDaq([]), spool_dir=directory)
+            self.assertEqual(destination.rows[(None, 'old')]['sample_id'], 'old')
 
     def test_target_identity_ignores_rotated_credentials(self):
         from services.daq_navi.core.production_acquisition import destination_identity
@@ -375,10 +386,14 @@ class ProductionAcquisitionTests(unittest.TestCase):
             destination = RecordingDestination()
             pipeline = ProductionPipeline(configuration(), Path(directory), destination,
                                           session_id="test-session")
+            self.assertIsNone(pipeline.last_delivery_ns)
             for index in range(5):
                 pipeline.capture([1, 2, 3, 4],
                                  end_time_ns=1_700_000_000_000_000_000 + index * 500_000)
             self.assertTrue(pipeline.flush_batches(4))
+            self.assertIsInstance(pipeline.last_delivery_ns, int)
+            self.assertEqual(pipeline.last_delivery_ns,
+                             json.loads((Path(directory) / 'status.json').read_text())['last_delivery_ns'])
             self.assertEqual(destination.write_sizes, [16])
             self.assertEqual(pipeline.pending_batches, 1)
             self.assertEqual(pipeline.spool.oldest()[0], "test-session:4")
@@ -395,6 +410,7 @@ class ProductionAcquisitionTests(unittest.TestCase):
             destination.uncertain = True
             with self.assertRaises(ConnectionError):
                 pipeline.flush_batches(4)
+            self.assertIsNone(pipeline.last_delivery_ns)
             self.assertEqual(pipeline.pending_batches, 3)
             pipeline.flush_batches(4)
             self.assertEqual(pipeline.pending_batches, 0)

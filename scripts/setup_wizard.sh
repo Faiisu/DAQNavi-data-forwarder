@@ -536,7 +536,7 @@ CHANNEL_COUNT="${CHANNEL_COUNT:-4}"
 ask CLOCK_RATE "Sampling Clock Rate in Hz [2000]:"
 CLOCK_RATE="${CLOCK_RATE:-2000}"
 
-ask DESTINATION "Telemetry Destination (postgresql|mqtt|influxdb) [postgresql]:"
+ask DESTINATION "Telemetry Destination (postgresql|influxdb) [postgresql]:"
 DESTINATION="${DESTINATION:-postgresql}"
 
 ask DAQ_PORT "DAQ web host port [8081]:"
@@ -655,7 +655,6 @@ if [[ -n "$COMPOSE_CMD" ]]; then
         say "Service Endpoints:"
         note "  • Ingestion Portal    : http://localhost:$PORTAL_PORT"
         note "  • TimescaleDB         : $DB_HOST:$DB_PORT (DB: $POSTGRES_DB)"
-        note "  • Mosquitto MQTT      : localhost:1883"
         note "  • InfluxDB Web UI     : http://localhost:8086"
       else
         warn "Some containers reported unhealthy or exited status."

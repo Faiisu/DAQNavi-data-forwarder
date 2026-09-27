@@ -54,8 +54,9 @@ def validate_production_config(cfg):
                     "SECTION_COUNT", "SPOOL_MAX_BYTES", "DB_RETENTION_DAYS"):
         if setting in cfg.raw and type(cfg.raw[setting]) is not int:
             raise ValueError(f"{setting} must be an integer")
-    if str(cfg.DESTINATION).lower() not in ("postgresql", "timescaledb", "influxdb"):
-        raise ValueError("production destination must be PostgreSQL/TimescaleDB or InfluxDB")
+    dest = str(cfg.DESTINATION).lower()
+    if dest not in ("postgresql", "timescaledb", "influxdb", "mqtt"):
+        raise ValueError("production destination must be PostgreSQL/TimescaleDB, InfluxDB, or MQTT")
     if cfg.MOCKUP_MODE:
         raise ValueError("production acquisition requires MOCKUP_MODE=false")
     if not isinstance(cfg.DEVICE_ID, str) or not cfg.DEVICE_ID.strip():
@@ -76,7 +77,7 @@ def validate_production_config(cfg):
         raise ValueError("DB_PRODUCTION_TABLE must be a simple SQL identifier")
     if cfg.DB_PRODUCTION_TABLE in (cfg.DB_TABLE, cfg.DB_MOCKUP_TABLE):
         raise ValueError("production table must differ from legacy and mockup tables")
-    if cfg.DESTINATION == "influxdb":
+    if dest == "influxdb":
         parsed = urllib.parse.urlsplit(str(cfg.INFLUX_URL))
         if parsed.scheme not in ("http", "https") or not parsed.hostname:
             raise ValueError("INFLUX_URL must be a valid HTTP(S) URL")
@@ -88,6 +89,21 @@ def validate_production_config(cfg):
             raise ValueError("INFLUX_MEASUREMENT must be a simple measurement name")
         if "\n" in cfg.DEVICE_ID or "\r" in cfg.DEVICE_ID:
             raise ValueError("DEVICE_ID cannot contain newline characters for InfluxDB")
+    elif dest == "mqtt":
+        if not getattr(cfg, "MQTT_TLS_ENABLED", False):
+            raise ValueError("MQTT production destination requires TLS to be enabled")
+        username = getattr(cfg, "MQTT_USERNAME", "")
+        if not username or not str(username).strip():
+            raise ValueError("MQTT production destination requires username")
+        password = getattr(cfg, "MQTT_PASSWORD", "")
+        if not password or not str(password).strip():
+            raise ValueError("MQTT production destination requires password")
+        qos = getattr(cfg, "MQTT_PRODUCTION_QOS", 1)
+        if qos not in (0, 1):
+            raise ValueError("MQTT production QoS must be 0 or 1")
+        topic_prefix = getattr(cfg, "MQTT_PRODUCTION_TOPIC_PREFIX", "")
+        if not topic_prefix or not str(topic_prefix).strip() or "+" in topic_prefix or "#" in topic_prefix:
+            raise ValueError("MQTT production topic prefix must be non-empty and cannot contain wildcards (+ or #)")
     selected_span = range(cfg.START_CHANNEL, cfg.START_CHANNEL + cfg.CHANNEL_COUNT)
     for index, channel in cfg.channels.items():
         if channel.enabled and index not in selected_span:
@@ -155,6 +171,10 @@ def destination_identity(cfg):
             raise ValueError("INFLUX_URL must not contain credentials; use INFLUX_TOKEN")
         identity = ["influxdb", cfg.INFLUX_URL.rstrip("/"), cfg.INFLUX_ORG, cfg.INFLUX_BUCKET,
                     cfg.INFLUX_MEASUREMENT]
+    elif cfg.DESTINATION == "mqtt":
+        identity = ["mqtt", str(cfg.MQTT_BROKER), int(cfg.MQTT_PORT),
+                    str(getattr(cfg, "MQTT_PRODUCTION_TOPIC_PREFIX", "daq/production/v1")),
+                    int(getattr(cfg, "MQTT_PRODUCTION_QOS", 1))]
     else:
         dsn = str(cfg.DB_DSN)
         parsed = urllib.parse.urlsplit(dsn)
@@ -197,9 +217,16 @@ class DurableSpool:
         self.conn = sqlite3.connect(self.path, timeout=5, check_same_thread=False)
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA synchronous=FULL")
-        self.conn.execute("PRAGMA busy_timeout=5000")
         self.conn.execute("CREATE TABLE IF NOT EXISTS batches (batch_id TEXT PRIMARY KEY, created_ns INTEGER NOT NULL, payload BLOB NOT NULL)")
-        self.conn.execute("CREATE TABLE IF NOT EXISTS gaps (gap_id TEXT PRIMARY KEY, start_ns INTEGER NOT NULL, end_ns INTEGER, cause TEXT NOT NULL, delivered INTEGER NOT NULL DEFAULT 0)")
+        self.conn.execute("CREATE TABLE IF NOT EXISTS gaps (gap_id TEXT PRIMARY KEY, start_ns INTEGER NOT NULL, end_ns INTEGER, cause TEXT NOT NULL, revision INTEGER NOT NULL DEFAULT 1, delivered_revision INTEGER NOT NULL DEFAULT 0)")
+        columns = {row[1] for row in self.conn.execute("PRAGMA table_info(gaps)")}
+        if "revision" not in columns:
+            self.conn.execute("ALTER TABLE gaps ADD COLUMN revision INTEGER NOT NULL DEFAULT 1")
+        if "delivered_revision" not in columns:
+            self.conn.execute("ALTER TABLE gaps ADD COLUMN delivered_revision INTEGER NOT NULL DEFAULT 0")
+            if "delivered" in columns:
+                self.conn.execute("UPDATE gaps SET delivered_revision = delivered")
+        self.conn.execute("CREATE TABLE IF NOT EXISTS cutovers (id INTEGER PRIMARY KEY AUTOINCREMENT, time_ns INTEGER NOT NULL, old_destination TEXT, new_destination TEXT, pending_records INTEGER NOT NULL DEFAULT 0)")
         self.conn.execute("CREATE TABLE IF NOT EXISTS state (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
         self.conn.commit()
         # Rebuild once after recovery. Recounting all pending blobs on every
@@ -239,7 +266,7 @@ class DurableSpool:
                                       "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                                       (str(last_sample_ns),))
                 if first_sample_ns is not None:
-                    self.conn.execute("UPDATE gaps SET end_ns=MAX(start_ns, ?), delivered=0 "
+                    self.conn.execute("UPDATE gaps SET end_ns=MAX(start_ns, ?), revision=revision+1 "
                                       "WHERE end_ns IS NULL", (first_sample_ns,))
                 self.conn.commit()
                 self._pending_count += 1
@@ -335,7 +362,7 @@ class DurableSpool:
             try:
                 self.conn.execute("BEGIN IMMEDIATE")
                 self.conn.executemany(
-                    "INSERT INTO gaps VALUES (?, ?, ?, ?, 0)",
+                    "INSERT INTO gaps (gap_id, start_ns, end_ns, cause, revision, delivered_revision) VALUES (?, ?, ?, ?, 1, 0)",
                     ((str(uuid.uuid4()), start, end, "operator_cleared_buffer")
                      for start, end in merged),
                 )
@@ -362,7 +389,8 @@ class DurableSpool:
     def record_gap(self, start_ns: int, end_ns: int, cause: str):
         with self._lock:
             gap_id = str(uuid.uuid4())
-            self.conn.execute("INSERT INTO gaps VALUES (?, ?, ?, ?, 0)", (gap_id, start_ns, max(start_ns, end_ns), cause))
+            self.conn.execute("INSERT INTO gaps (gap_id, start_ns, end_ns, cause, revision, delivered_revision) VALUES (?, ?, ?, ?, 1, 0)",
+                              (gap_id, start_ns, max(start_ns, end_ns), cause))
             self.conn.commit()
             return gap_id
 
@@ -372,15 +400,34 @@ class DurableSpool:
             if existing:
                 return existing[0]
             gap_id = str(uuid.uuid4())
-            self.conn.execute("INSERT INTO gaps VALUES (?, ?, NULL, ?, 0)", (gap_id, start_ns, cause))
+            self.conn.execute("INSERT INTO gaps (gap_id, start_ns, end_ns, cause, revision, delivered_revision) VALUES (?, ?, NULL, ?, 1, 0)",
+                              (gap_id, start_ns, cause))
             self.conn.commit()
             return gap_id
 
     def close_open_gaps_for_switch(self, end_ns: int):
         """Close open intervals at a stopped boundary and queue their final update."""
         with self._lock:
-            self.conn.execute("UPDATE gaps SET end_ns=MAX(start_ns, ?), delivered=0 WHERE end_ns IS NULL", (end_ns,))
+            self.conn.execute("UPDATE gaps SET end_ns=MAX(start_ns, ?), revision=revision+1 WHERE end_ns IS NULL", (end_ns,))
             self.conn.commit()
+
+    def record_cutover(self, old_destination: str, new_destination: str, pending_records: int = 0, when_ns: int | None = None):
+        when_ns = time.time_ns() if when_ns is None else int(when_ns)
+        with self._lock:
+            self.conn.execute(
+                "INSERT INTO cutovers (time_ns, old_destination, new_destination, pending_records) VALUES (?, ?, ?, ?)",
+                (when_ns, str(old_destination or ""), str(new_destination or ""), int(pending_records))
+            )
+            self.conn.commit()
+
+    def recent_cutovers(self, limit: int = 5):
+        with self._lock:
+            rows = self.conn.execute(
+                "SELECT time_ns, old_destination, new_destination, pending_records "
+                "FROM cutovers ORDER BY time_ns DESC, id DESC LIMIT ?",
+                (limit,)
+            ).fetchall()
+            return [{"time_ns": r[0], "from": r[1], "to": r[2], "pending_records": r[3]} for r in rows]
 
     def state_value(self, key):
         with self._lock:
@@ -394,12 +441,32 @@ class DurableSpool:
 
     def pending_gaps(self):
         with self._lock:
-            return [dict(zip(("gap_id", "start_ns", "end_ns", "cause"), row))
-                    for row in self.conn.execute("SELECT gap_id,start_ns,end_ns,cause FROM gaps WHERE delivered=0 ORDER BY start_ns")]
+            return [dict(zip(("gap_id", "revision", "start_ns", "end_ns", "cause"), row))
+                    for row in self.conn.execute(
+                        "SELECT gap_id, revision, start_ns, end_ns, cause FROM gaps "
+                        "WHERE delivered_revision < revision ORDER BY start_ns, revision")]
 
-    def acknowledge_gaps(self, gap_ids):
+    def acknowledge_gaps(self, gap_items):
         with self._lock:
-            self.conn.executemany("UPDATE gaps SET delivered=1 WHERE gap_id=?", ((item,) for item in gap_ids))
+            for item in gap_items:
+                if isinstance(item, dict):
+                    gap_id = item["gap_id"]
+                    rev = item.get("revision")
+                    if rev is not None:
+                        self.conn.execute(
+                            "UPDATE gaps SET delivered_revision=MAX(delivered_revision, ?) WHERE gap_id=?",
+                            (rev, gap_id),
+                        )
+                    else:
+                        self.conn.execute(
+                            "UPDATE gaps SET delivered_revision=revision WHERE gap_id=?",
+                            (gap_id,),
+                        )
+                else:
+                    self.conn.execute(
+                        "UPDATE gaps SET delivered_revision=revision WHERE gap_id=?",
+                        (str(item),),
+                    )
             self.conn.commit()
 
     def close(self):
@@ -449,6 +516,7 @@ class ProductionPipeline:
         self.last_sample_ns = None
         self.last_fault = None
         self.last_writer_error = None
+        self.last_delivery_ns = None
         self.state = "starting"
         self.last_receive_offset_ns = 0
         self.phase_adjust_ns = 0
@@ -483,11 +551,13 @@ class ProductionPipeline:
             status = {
                 "state": self.state,
                 "source": "physical_daq",
+                "destination": self.cfg.DESTINATION,
                 "session_id": self.session_id,
                 "checked_at_ns": time.time_ns(),
                 "last_sample_ns": self.last_sample_ns,
                 "last_fault": self.last_fault,
                 "last_writer_error": self.last_writer_error,
+                "last_delivery_ns": self.last_delivery_ns,
                 "pending_batches": self.spool.pending_batches,
                 "pending_bytes": self.spool.pending_bytes,
                 "spool_bytes": self.spool.usage_bytes,
@@ -612,7 +682,8 @@ class ProductionPipeline:
         rows = [row for _, batch_rows in pending for row in batch_rows]
         self.destination.write(rows, gaps)
         self.spool.acknowledge_many([batch_id for batch_id, _ in pending])
-        self.spool.acknowledge_gaps([gap["gap_id"] for gap in gaps])
+        self.spool.acknowledge_gaps(gaps)
+        self.last_delivery_ns = time.time_ns()
         self.last_writer_error = None
         self.publish_status()
         return True
@@ -800,6 +871,169 @@ class InfluxProductionDestination:
             raise RuntimeError(f"InfluxDB write returned HTTP {exc.code}") from exc
 
 
+class MQTTProductionDestination:
+    """Production MQTT destination delivering physical samples and gaps over authenticated TLS."""
+
+    def __init__(self, cfg):
+        self.cfg = cfg
+        self.broker = str(cfg.MQTT_BROKER)
+        self.port = int(cfg.MQTT_PORT)
+        self.username = str(cfg.MQTT_USERNAME)
+        self.password = str(cfg.MQTT_PASSWORD)
+        self.tls_enabled = bool(cfg.MQTT_TLS_ENABLED)
+        self.ca_certs = getattr(cfg, "MQTT_CA_CERTS", "") or None
+        self.client_cert = getattr(cfg, "MQTT_CLIENT_CERT", "") or None
+        self.client_key = getattr(cfg, "MQTT_CLIENT_KEY", "") or None
+        self.qos = int(getattr(cfg, "MQTT_PRODUCTION_QOS", 1))
+        self.topic_prefix = str(getattr(cfg, "MQTT_PRODUCTION_TOPIC_PREFIX", "daq/production/v1")).rstrip("/")
+        self.max_payload_bytes = int(getattr(cfg, "MQTT_PRODUCTION_MAX_PAYLOAD_BYTES", 256 * 1024))
+
+        self._lock = threading.Lock()
+        self._pending_mids = {}
+        self._acked_mids = set()
+        self._client_id = f"daq_prod_{uuid.uuid4().hex[:8]}"
+
+        import paho.mqtt.client as mqtt
+        self.client = mqtt.Client(client_id=self._client_id)
+        if self.username or self.password:
+            self.client.username_pw_set(self.username, self.password)
+        if self.tls_enabled:
+            tls_kwargs = {}
+            if self.ca_certs:
+                tls_kwargs["ca_certs"] = self.ca_certs
+            if self.client_cert:
+                tls_kwargs["certfile"] = self.client_cert
+            if self.client_key:
+                tls_kwargs["keyfile"] = self.client_key
+            self.client.tls_set(**tls_kwargs)
+
+        self.client.on_connect = lambda *args, **kwargs: None
+        self.client.on_publish = self._on_publish
+        self.client.connect(self.broker, self.port)
+        self.client.loop_start()
+
+    def _on_publish(self, client, userdata, mid, *args, **kwargs):
+        with self._lock:
+            self._acked_mids.add(mid)
+            event = self._pending_mids.get(mid)
+            if event is not None:
+                event.set()
+
+    def ensure_schema(self):
+        pass
+
+    def write(self, rows: list[dict], gaps: list[dict]):
+        if not rows and not gaps:
+            return
+
+        events_to_wait = []
+        safe_device = urllib.parse.quote(str(self.cfg.DEVICE_ID), safe="")
+        sample_topic = f"{self.topic_prefix}/{safe_device}/samples"
+        gap_topic = f"{self.topic_prefix}/{safe_device}/gaps"
+
+        # 1. Publish sample chunks if any
+        if rows:
+            batch_id = hashlib.sha256(
+                f"{rows[0].get('sample_id')}:{rows[-1].get('sample_id')}:{rows[0].get('time_ns')}:{len(rows)}".encode()
+            ).hexdigest()[:16]
+
+            chunks = []
+            curr_chunk = []
+            base_envelope = {
+                "schema_version": 1,
+                "device_id": self.cfg.DEVICE_ID,
+                "batch_id": batch_id,
+            }
+
+            for row in rows:
+                if curr_chunk:
+                    test_chunk = curr_chunk + [row]
+                    test_chunk_id = f"{batch_id}:c{len(chunks)}"
+                    envelope = dict(base_envelope, chunk_id=test_chunk_id, samples=test_chunk)
+                    payload_len = len(json.dumps(
+                        envelope, separators=(',', ':'), allow_nan=False).encode("utf-8"))
+                    if payload_len <= self.max_payload_bytes:
+                        curr_chunk.append(row)
+                        continue
+                    chunks.append(curr_chunk)
+                    curr_chunk = []
+
+                chunk_id = f"{batch_id}:c{len(chunks)}"
+                envelope = dict(base_envelope, chunk_id=chunk_id, samples=[row])
+                payload_len = len(json.dumps(
+                    envelope, separators=(',', ':'), allow_nan=False).encode("utf-8"))
+                if payload_len > self.max_payload_bytes:
+                    raise ValueError(
+                        "MQTT sample envelope exceeds maximum payload size "
+                        f"(sample_id={row.get('sample_id')}, actual_bytes={payload_len}, "
+                        f"max_bytes={self.max_payload_bytes})")
+                curr_chunk.append(row)
+            if curr_chunk:
+                chunks.append(curr_chunk)
+
+            for idx, chunk in enumerate(chunks):
+                chunk_id = f"{batch_id}:c{idx}"
+                envelope = dict(base_envelope, chunk_id=chunk_id, samples=chunk)
+                payload_str = json.dumps(envelope, separators=(',', ':'), allow_nan=False)
+                res = self.client.publish(sample_topic, payload_str, qos=self.qos, retain=False)
+                if getattr(res, "rc", 0) != 0:
+                    raise RuntimeError(f"MQTT publish rejected with code {res.rc}")
+                mid = res.mid
+                event = threading.Event()
+                with self._lock:
+                    if mid in self._acked_mids:
+                        event.set()
+                    else:
+                        self._pending_mids[mid] = event
+                events_to_wait.append((mid, event))
+
+        # 2. Publish gaps if any
+        for gap in gaps:
+            payload = {
+                "schema_version": 1,
+                "device_id": self.cfg.DEVICE_ID,
+                "gap_id": gap["gap_id"],
+                "revision": gap.get("revision", 1),
+                "start_ns": gap["start_ns"],
+                "end_ns": gap.get("end_ns"),
+                "cause": gap["cause"],
+            }
+            payload_str = json.dumps(payload, separators=(',', ':'), allow_nan=False)
+            res = self.client.publish(gap_topic, payload_str, qos=self.qos, retain=False)
+            if getattr(res, "rc", 0) != 0:
+                raise RuntimeError(f"MQTT publish rejected with code {res.rc}")
+            mid = res.mid
+            event = threading.Event()
+            with self._lock:
+                if mid in self._acked_mids:
+                    event.set()
+                else:
+                    self._pending_mids[mid] = event
+            events_to_wait.append((mid, event))
+
+        # 3. Wait for all messages to complete
+        deadline = time.monotonic() + 10.0
+        for mid, event in events_to_wait:
+            remaining = max(0.01, deadline - time.monotonic())
+            if not event.wait(remaining):
+                raise TimeoutError(f"MQTT publish timed out waiting for mid {mid}")
+
+        with self._lock:
+            for mid, _ in events_to_wait:
+                self._pending_mids.pop(mid, None)
+                self._acked_mids.discard(mid)
+
+    def close(self):
+        try:
+            self.client.loop_stop()
+        except Exception:
+            pass
+        try:
+            self.client.disconnect()
+        except Exception:
+            pass
+
+
 class AdvantechDaq:
     """Small hardware adapter. getDataF64 count is interleaved scalar values."""
 
@@ -882,22 +1116,23 @@ def run_production(cfg, stop_event=None, daq_factory=AdvantechDaq, destination=N
     stop_event = stop_event or threading.Event()
     guard_spool = DurableSpool(Path(spool_dir or cfg.SPOOL_DIR), cfg.SPOOL_MAX_BYTES)
     try:
-        open_gap = guard_spool.conn.execute("SELECT 1 FROM gaps WHERE end_ns IS NULL LIMIT 1").fetchone()
-        pending = guard_spool.pending_batches or guard_spool.pending_gaps() or open_gap
-        prior_destination = guard_spool.state_value("destination") or ("postgresql" if pending else None)
+        prior_destination = guard_spool.state_value("destination")
         prior_identity = guard_spool.state_value("destination_identity")
         current_identity = destination_identity(cfg)
-        if pending and prior_destination and prior_destination != cfg.DESTINATION:
-            raise AcquisitionFault(f"spool contains records for {prior_destination}; drain them before switching to {cfg.DESTINATION}")
-        if pending and prior_identity and prior_identity != current_identity:
-            raise AcquisitionFault("spool contains records for a different destination target; drain them before changing destination settings")
+        if prior_destination and (prior_destination != cfg.DESTINATION or (prior_identity and prior_identity != current_identity)):
+            pending = guard_spool.pending_batches + len(guard_spool.pending_gaps())
+            guard_spool.record_cutover(prior_destination, cfg.DESTINATION, pending)
         guard_spool.set_state("destination", cfg.DESTINATION)
         guard_spool.set_state("destination_identity", current_identity)
     finally:
         guard_spool.close()
     if destination is None:
-        destination = (InfluxProductionDestination(cfg) if cfg.DESTINATION == "influxdb"
-                       else TimescaleProductionDestination(cfg))
+        if cfg.DESTINATION == "mqtt":
+            destination = MQTTProductionDestination(cfg)
+        elif cfg.DESTINATION == "influxdb":
+            destination = InfluxProductionDestination(cfg)
+        else:
+            destination = TimescaleProductionDestination(cfg)
     pipeline = ProductionPipeline(cfg, Path(spool_dir or cfg.SPOOL_DIR), destination)
     writer_stop = threading.Event()
     writer_deadline = [None]

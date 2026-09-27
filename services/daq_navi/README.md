@@ -1,68 +1,15 @@
-# DAQ Navi Service (Standalone Application)
+# DAQNavi service
 
-This service provides hardware data acquisition for Advantech DAQ cards (PCI-1716, USB-4716), a durable SQLite spooling buffer with automatic offline replay, nanosecond-precision sample recording, TimescaleDB / InfluxDB 2.x delivery, and a Web-based Config Center with operator access control.
+DAQNavi provides operator login, hardware and channel configuration, acquisition control, a durable production spool, and writers for PostgreSQL/TimescaleDB, InfluxDB 2.x, and production MQTT.
 
----
+## Deployment
 
-## 🚀 Standalone Deployment (1 Command)
+Use the independent deployment project at [`deploy/daq-navi/`](../../deploy/daq-navi/) and follow the [Linux deployment guide](../../DEPLOY_LINUX.md). The service mounts the host DAQNavi/BioDAQ libraries and the private configuration directory. Physical capture requires the supported vendor driver and DAQ device on the host.
 
-This directory is completely self-contained. You can copy this folder to any Linux host with Docker installed and deploy it immediately:
+See the [Linux deployment guide](../../DEPLOY_LINUX.md#first-operator-login) for initial login and password rotation.
 
-```bash
-docker compose up -d --build
-```
+## Production delivery
 
-### Configuration & Environment Variables
+Production acquisition writes physical samples and acquisition gaps to a persistent SQLite spool before sending them to the selected destination. Pending records follow the latest saved configuration. Database destinations provide queryable history; MQTT history belongs to an external consumer. Mockup acquisition writes to database destinations and does not use MQTT. See the [production data flow](../../docs/architecture/data-flow.md) and [MQTT v1 contract](../../docs/contracts/production-mqtt-contract-v1.md) for the authoritative delivery details.
 
-You can configure deployment options via an optional `.env` file in this directory:
-
-```env
-# Port for DAQ Web Config Center (Default: 8081)
-DAQ_PORT=8081
-
-# Origin of the central Portal (Default: http://localhost:8080)
-PORTAL_ORIGIN=http://localhost:8080
-
-# Operator credentials (PBKDF2 Salted Hash) & Session Signing Key
-DAQ_OPERATOR_USER=operator
-DAQ_OPERATOR_HASH=pbkdf2_sha256:100000:<salt_hex>:<hash_hex>
-DAQ_SESSION_KEY=<random_32_bytes_key>
-```
-
-To generate operator hash and session key:
-```bash
-python3 -c "from web import auth; print(auth.hash_password('MySecretPassword'))"
-python3 -c "import secrets; print(secrets.token_hex(32))"
-```
-
----
-
-## 📁 Directory Structure
-
-```text
-daq_navi/
-├── Dockerfile          # Self-contained container build
-├── compose.yml         # Standalone Docker Compose definition
-├── entrypoint.sh       # Container entrypoint & hardware/mockup runner
-├── requirements.txt    # Python dependencies
-├── config.json         # Acquisition & channel settings
-├── app.py              # Root application entrypoint
-├── core/               # Production acquisition pipeline & durable spooler
-├── web/                # Web Config Center (Flask + Socket.IO + Auth)
-├── scripts/            # Database schema & maintenance scripts
-├── tools/              # Utility & plotting scripts
-└── tests/              # Unit & integration test suites
-```
-
----
-
-## 🔍 Health & Verification
-
-Once started, verify service availability:
-```bash
-curl http://localhost:8081/api/health
-```
-Web Config Center is accessible at:
-```text
-http://<host-ip>:8081/
-```
+See the [DAQNavi Config Center guide](web/README.md), [test and qualification guide](tests/README.md), and [MQTT v1 contract](../../docs/contracts/production-mqtt-contract-v1.md).

@@ -1,5 +1,5 @@
 const $ = (id) => document.getElementById(id);
-const fields = ['DEVICE_DESCRIPTION', 'DEVICE_ID', 'PROFILE_PATH', 'START_CHANNEL', 'CHANNEL_COUNT', 'CLOCK_RATE', 'SECTION_LENGTH', 'SECTION_COUNT', 'DESTINATION', 'DB_PRODUCTION_TABLE', 'DB_CONNECTION_MODE', 'DB_HOST', 'DB_PORT', 'DB_NAME', 'DB_USER', 'DB_PASSWORD', 'DB_DSN', 'DB_RETENTION_DAYS', 'SPOOL_MAX_BYTES', 'DB_MOCKUP_TABLE', 'INFLUX_URL', 'INFLUX_ORG', 'INFLUX_BUCKET', 'INFLUX_TOKEN', 'INFLUX_MEASUREMENT', 'MQTT_BROKER', 'MQTT_PORT', 'MQTT_TOPIC', 'MQTT_QOS', 'MQTT_USERNAME', 'MQTT_PASSWORD', 'MQTT_CA_CERTS', 'MQTT_CLIENT_CERT', 'MQTT_CLIENT_KEY', 'AUTO_START_MODE'];
+const fields = ['DEVICE_DESCRIPTION', 'DEVICE_ID', 'PROFILE_PATH', 'START_CHANNEL', 'CHANNEL_COUNT', 'CLOCK_RATE', 'SECTION_LENGTH', 'SECTION_COUNT', 'DESTINATION', 'DB_PRODUCTION_TABLE', 'DB_CONNECTION_MODE', 'DB_HOST', 'DB_PORT', 'DB_NAME', 'DB_USER', 'DB_PASSWORD', 'DB_DSN', 'DB_RETENTION_DAYS', 'SPOOL_MAX_BYTES', 'DB_MOCKUP_TABLE', 'INFLUX_URL', 'INFLUX_ORG', 'INFLUX_BUCKET', 'INFLUX_TOKEN', 'INFLUX_MEASUREMENT', 'MQTT_BROKER', 'MQTT_PORT', 'MQTT_PRODUCTION_TOPIC_PREFIX', 'MQTT_PRODUCTION_QOS', 'MQTT_USERNAME', 'MQTT_PASSWORD', 'MQTT_CA_CERTS', 'MQTT_CLIENT_CERT', 'MQTT_CLIENT_KEY', 'AUTO_START_MODE'];
 const scaleIds = ['scale-low-voltage', 'scale-high-voltage', 'scale-low-value', 'scale-high-value'];
 let config = {};
 let channels = {};
@@ -78,9 +78,13 @@ async function loadConfig() {
       const hasSecret = Boolean(config[id] && config[id] !== '');
       el.value = '';
       el.dataset.hasSaved = hasSecret ? 'true' : 'false';
-      el.placeholder = hasSecret ? 'Saved secret unchanged (leave blank to keep)' : (id === 'MQTT_PASSWORD' ? 'Optional broker password' : 'Enter secret');
+      el.placeholder = hasSecret ? 'Saved secret unchanged (leave blank to keep)' : (id === 'MQTT_PASSWORD' ? 'Broker password' : 'Enter secret');
     } else if (config[id] !== undefined) {
       el.value = config[id];
+    } else if (id === 'MQTT_PRODUCTION_TOPIC_PREFIX') {
+      el.value = 'daq/production/v1';
+    } else if (id === 'MQTT_PRODUCTION_QOS') {
+      el.value = '1';
     }
   });
   $('AUTO_START_ON_STARTUP').checked = config.AUTO_START_ON_STARTUP === true;
@@ -255,9 +259,11 @@ function updateSummary() {
   $('summary-channels').textContent = String(active).padStart(2, '0');
   $('summary-channel-span').textContent = valid ? `AI${start}–AI${end - 1} · ${end - start} read` : 'Set a valid channel span';
   $('summary-rate').textContent = `${value('CLOCK_RATE') || '—'} Hz`;
-  $('info-mode').textContent = titleCase(config.AUTO_START_MODE || 'production');
-  $('info-destination').textContent = titleCase(config.DESTINATION || 'PostgreSQL');
-  $('info-retention').textContent = config.DESTINATION === 'influxdb' ? 'Managed by InfluxDB bucket' : `${config.DB_RETENTION_DAYS ?? '—'} days`;
+  const destination = value('DESTINATION') || config.DESTINATION || 'postgresql';
+  const mode = value('AUTO_START_MODE') || config.AUTO_START_MODE || 'production';
+  $('info-mode').textContent = titleCase(mode);
+  $('info-destination').textContent = destination === 'mqtt' ? 'MQTT' : titleCase(destination);
+  $('info-retention').textContent = destination === 'influxdb' ? 'Managed by InfluxDB bucket' : destination === 'mqtt' ? 'Managed by external consumer' : `${$('DB_RETENTION_DAYS').value || config.DB_RETENTION_DAYS || '—'} days`;
 }
 function titleCase(input) { return String(input).replaceAll('_', ' ').replace(/\b\w/g, (letter) => letter.toUpperCase()); }
 function postgresDsn() {
@@ -296,7 +302,7 @@ function collectConfig() {
       }
       return;
     }
-    const integerFields = ['START_CHANNEL', 'CHANNEL_COUNT', 'CLOCK_RATE', 'SECTION_LENGTH', 'SECTION_COUNT', 'DB_PORT', 'DB_RETENTION_DAYS', 'SPOOL_MAX_BYTES', 'MQTT_PORT', 'MQTT_QOS'];
+    const integerFields = ['START_CHANNEL', 'CHANNEL_COUNT', 'CLOCK_RATE', 'SECTION_LENGTH', 'SECTION_COUNT', 'DB_PORT', 'DB_RETENTION_DAYS', 'SPOOL_MAX_BYTES', 'MQTT_PORT', 'MQTT_PRODUCTION_QOS'];
     payload[id] = integerFields.includes(id) ? Number(el.value) : el.value.trim();
   });
   if (payload.DB_CONNECTION_MODE === 'fields') {
@@ -317,7 +323,7 @@ function validateConfig(payload) {
   if (!Number.isInteger(payload.SECTION_LENGTH) || payload.SECTION_LENGTH < 1) add('device', 'Section length must be a positive whole number.');
   if (!Number.isInteger(payload.SECTION_COUNT) || payload.SECTION_COUNT < 0) add('device', 'Section count must be zero or a positive whole number.');
   if (!Number.isInteger(payload.CLOCK_RATE) || payload.CLOCK_RATE < 1000 || payload.CLOCK_RATE > 2000) add('device', 'Sample rate must be between 1000 and 2000 Hz per channel.');
-  if (payload.DESTINATION !== 'influxdb' && (!Number.isInteger(payload.DB_RETENTION_DAYS) || payload.DB_RETENTION_DAYS < 1)) add('destination', 'Retention must be at least one day.');
+  if (payload.DESTINATION === 'postgresql' && (!Number.isInteger(payload.DB_RETENTION_DAYS) || payload.DB_RETENTION_DAYS < 1)) add('destination', 'Retention must be at least one day.');
   Object.entries(payload.CHANNELS).forEach(([index, channel]) => {
     for (const key of ['low_voltage', 'high_voltage', 'low_value', 'high_value']) {
       if (!Number.isFinite(channel.scale?.[key])) add('channels', `AI${index} calibration ${key.replaceAll('_', ' ')} must be a number.`);
@@ -347,17 +353,29 @@ function validateConfig(payload) {
   if (payload.AUTO_START_MODE === 'production') {
     if (!payload.DEVICE_ID) add('device', 'Device ID is required.');
     if (!Number.isInteger(payload.SPOOL_MAX_BYTES) || payload.SPOOL_MAX_BYTES < 1) add('destination', 'Spool capacity must be a positive whole number.');
-    if (!['postgresql', 'influxdb'].includes(payload.DESTINATION)) add('destination', 'Production destination must be PostgreSQL / TimescaleDB or InfluxDB.');
+    if (!['postgresql', 'influxdb', 'mqtt'].includes(payload.DESTINATION)) add('destination', 'Choose PostgreSQL / TimescaleDB, InfluxDB, or MQTT as the production destination.');
     if (payload.DESTINATION === 'influxdb') {
       try { const url = new URL(payload.INFLUX_URL); if (!['http:', 'https:'].includes(url.protocol)) throw new Error(); }
       catch (_) { add('destination', 'Enter a valid HTTP(S) InfluxDB URL.'); }
       if (!payload.INFLUX_ORG || !payload.INFLUX_BUCKET || !payload.INFLUX_TOKEN) add('destination', 'InfluxDB organization, bucket, and token are required.');
     }
+    if (payload.DESTINATION === 'mqtt') {
+      if (!payload.MQTT_BROKER) add('destination', 'MQTT broker host is required.');
+      if (!Number.isInteger(payload.MQTT_PORT) || payload.MQTT_PORT < 1 || payload.MQTT_PORT > 65535) add('destination', 'MQTT broker port must be between 1 and 65535.');
+      if (!payload.MQTT_USERNAME) add('destination', 'Production MQTT requires a broker username.');
+      if (!payload.MQTT_PASSWORD) add('destination', 'Production MQTT requires a broker password. Enter it or keep the saved password.');
+      if (payload.MQTT_TLS_ENABLED !== true) add('destination', 'Production MQTT requires verified TLS.');
+      if (![0, 1].includes(payload.MQTT_PRODUCTION_QOS)) add('destination', 'Production MQTT QoS must be 0 or 1.');
+      if (!payload.MQTT_PRODUCTION_TOPIC_PREFIX || /[+#]/.test(payload.MQTT_PRODUCTION_TOPIC_PREFIX)) add('destination', 'Enter a production topic prefix without MQTT wildcards.');
+    }
     if (Number.isInteger(payload.SECTION_COUNT) && payload.SECTION_COUNT > 0) add('device', 'Production acquisition requires section count 0 (continuous).');
     if (!active.length) add('channels', 'Enable at least one sensor channel.');
-    if (!/^[a-z][a-z0-9_]*$/.test(payload.DB_PRODUCTION_TABLE)) add('destination', 'Production table must use lowercase letters, numbers, and underscores, starting with a letter.');
-    if (payload.DB_PRODUCTION_TABLE === payload.DB_MOCKUP_TABLE || payload.DB_PRODUCTION_TABLE === config.DB_TABLE) add('destination', 'Production table must differ from mockup and legacy tables.');
+    if (payload.DESTINATION === 'postgresql') {
+      if (!/^[a-z][a-z0-9_]*$/.test(payload.DB_PRODUCTION_TABLE)) add('destination', 'Production table must use lowercase letters, numbers, and underscores, starting with a letter.');
+      if (payload.DB_PRODUCTION_TABLE === payload.DB_MOCKUP_TABLE || payload.DB_PRODUCTION_TABLE === config.DB_TABLE) add('destination', 'Production table must differ from mockup and legacy tables.');
+    }
   }
+  if (payload.AUTO_START_MODE === 'mockup' && payload.DESTINATION === 'mqtt') add('destination', 'MQTT is a production destination. Choose PostgreSQL / TimescaleDB or InfluxDB for mockup acquisition.');
   return errors;
 }
 
@@ -414,7 +432,7 @@ async function testDestination() {
   const resultBox = $('destination-result');
   const payload = {};
   const secretIds = ['DB_PASSWORD', 'INFLUX_TOKEN', 'MQTT_PASSWORD'];
-  ['DESTINATION', 'DB_CONNECTION_MODE', 'DB_DSN', 'DB_HOST', 'DB_PORT', 'DB_NAME', 'DB_USER', 'DB_PASSWORD', 'INFLUX_URL', 'INFLUX_ORG', 'INFLUX_BUCKET', 'INFLUX_TOKEN', 'MQTT_BROKER', 'MQTT_PORT', 'MQTT_USERNAME', 'MQTT_PASSWORD', 'MQTT_TLS_ENABLED', 'MQTT_CA_CERTS', 'MQTT_CLIENT_CERT', 'MQTT_CLIENT_KEY'].forEach((id) => {
+  ['DESTINATION', 'DB_CONNECTION_MODE', 'DB_DSN', 'DB_HOST', 'DB_PORT', 'DB_NAME', 'DB_USER', 'DB_PASSWORD', 'INFLUX_URL', 'INFLUX_ORG', 'INFLUX_BUCKET', 'INFLUX_TOKEN', 'MQTT_BROKER', 'MQTT_PORT', 'MQTT_PRODUCTION_TOPIC_PREFIX', 'MQTT_PRODUCTION_QOS', 'MQTT_USERNAME', 'MQTT_PASSWORD', 'MQTT_TLS_ENABLED', 'MQTT_CA_CERTS', 'MQTT_CLIENT_CERT', 'MQTT_CLIENT_KEY'].forEach((id) => {
     const input = $(id);
     if (!input) return;
     if (secretIds.includes(id)) {
@@ -513,6 +531,63 @@ async function refreshStatus() {
     $('buffer-capacity').textContent = `${formatBytes(capacity)} capacity`;
     $('buffer-meter').style.width = `${capacity ? Math.min(100, bytes / capacity * 100) : 0}%`;
     $('info-last-sample').textContent = status.last_sample_ns ? new Date(Number(status.last_sample_ns) / 1e6).toLocaleTimeString() : 'No recent sample';
+    const mqttSelected = config.DESTINATION === 'mqtt' && config.AUTO_START_MODE !== 'mockup';
+    $('mqtt-runtime-card').classList.toggle('hidden', !mqttSelected);
+    if (mqttSelected) {
+      const broker = config.MQTT_BROKER ? `${config.MQTT_BROKER}:${config.MQTT_PORT || 8883}` : 'Not configured';
+      $('mqtt-runtime-broker').textContent = broker;
+      $('mqtt-runtime-qos').textContent = `QoS ${config.MQTT_PRODUCTION_QOS ?? 1}`;
+      const delivery = status.mqtt_delivery || {};
+      const completedAt = delivery.last_completed_ns ? new Date(Number(delivery.last_completed_ns) / 1e6).toLocaleString() : null;
+      $('mqtt-runtime-state').textContent = delivery.state === 'error' ? `Delivery error: ${status.writer_error || 'unknown error'}` :
+        delivery.state === 'completed' ? `Last send completed ${completedAt}` :
+        delivery.state === 'pending' ? 'Pending first delivery' :
+        delivery.state === 'idle' ? 'No completed delivery this run' :
+        delivery.state === 'stopped' ? (completedAt ? `Stopped; last send completed ${completedAt}` : 'Stopped; no completed delivery this run') :
+        'Delivery status unavailable';
+      const gaps = Array.isArray(status.gaps) ? status.gaps.slice(0, 5) : [];
+      $('mqtt-runtime-gaps').textContent = String(gaps.length);
+      const gapList = $('mqtt-gap-list');
+      gapList.replaceChildren();
+      if (!gaps.length) {
+        const empty = document.createElement('li');
+        empty.textContent = 'No recent local gaps.';
+        gapList.append(empty);
+      } else {
+        gaps.forEach((gap) => {
+          const item = document.createElement('li');
+          const start = Number(gap.start_ns);
+          const end = gap.end_ns === null || gap.end_ns === undefined ? null : Number(gap.end_ns);
+          const interval = document.createElement('strong');
+          interval.textContent = `${Number.isFinite(start) ? new Date(start / 1e6).toLocaleString() : 'Unknown start'} – ${end === null ? 'open' : Number.isFinite(end) ? new Date(end / 1e6).toLocaleString() : 'Unknown end'}`;
+          const cause = document.createElement('small');
+          cause.textContent = String(gap.cause || 'Unspecified');
+          item.append(interval, cause);
+          gapList.append(item);
+        });
+      }
+      const cutovers = Array.isArray(status.destination_cutovers) ? status.destination_cutovers.slice(0, 5) : [];
+      const cutoverList = $('mqtt-cutover-list');
+      cutoverList.replaceChildren();
+      if (!cutovers.length) {
+        const empty = document.createElement('li');
+        empty.textContent = 'No destination changes recorded.';
+        cutoverList.append(empty);
+      } else {
+        cutovers.forEach((cutover) => {
+          const item = document.createElement('li');
+          const time = document.createElement('time');
+          const timestamp = Number(cutover.time_ns);
+          time.textContent = Number.isFinite(timestamp) ? new Date(timestamp / 1e6).toLocaleString() : String(cutover.time || '');
+          const route = document.createElement('strong');
+          route.textContent = `${cutover.from || 'Unknown'} → ${cutover.to || 'Unknown'}`;
+          const pendingAtCutover = document.createElement('small');
+          pendingAtCutover.textContent = `${Number(cutover.pending_records || 0)} record(s) pending at cutover`;
+          item.append(time, route, pendingAtCutover);
+          cutoverList.append(item);
+        });
+      }
+    }
     if (!response.ok && status.fault) throw new Error(status.fault);
   } catch (error) {
     pendingSamples = [];
@@ -530,6 +605,7 @@ async function refreshStatus() {
     clearing = false;
     $('runtime-description').textContent = 'DAQ service unavailable.';
     $('runtime-message').textContent = 'Check the DAQ service before controlling acquisition.';
+    $('mqtt-runtime-state').textContent = 'Delivery status unavailable';
   }
 }
 function pendingTrendElements() {
@@ -683,10 +759,13 @@ function markChanged() {
 }
 function updateDestinationFields() {
   const destination = value('DESTINATION');
+  const mode = value('AUTO_START_MODE');
   document.querySelectorAll('.postgres-only').forEach((element) => element.classList.toggle('hidden', destination !== 'postgresql'));
   document.querySelectorAll('.influx-only').forEach((element) => element.classList.toggle('hidden', destination !== 'influxdb'));
   $('influx-fields').classList.toggle('hidden', destination !== 'influxdb');
   $('mqtt-fields').classList.toggle('hidden', destination !== 'mqtt');
+  $('mqtt-production-options').classList.toggle('hidden', destination !== 'mqtt' || mode !== 'production');
+  $('DESTINATION').querySelector('option[value="mqtt"]').disabled = mode === 'mockup';
   document.querySelectorAll('.postgres-fields').forEach((element) => element.classList.toggle('hidden', destination !== 'postgresql' || manualDsn));
   $('db-dsn-fields').classList.toggle('hidden', destination !== 'postgresql' || !manualDsn);
 }
@@ -723,6 +802,7 @@ $('DB_CONNECTION_MODE').addEventListener('change', () => {
 });
 $('AUTO_START_ON_STARTUP').addEventListener('change', markChanged);
 $('DESTINATION').addEventListener('change', updateDestinationFields);
+$('AUTO_START_MODE').addEventListener('change', updateDestinationFields);
 $('MQTT_TLS_ENABLED').addEventListener('change', markChanged);
 document.querySelectorAll('.side-nav a').forEach((link) => link.addEventListener('click', () => {
   document.querySelectorAll('.side-nav a').forEach((item) => item.classList.remove('active'));

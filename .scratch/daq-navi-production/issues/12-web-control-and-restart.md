@@ -16,7 +16,7 @@
 All acceptance criteria for Ticket 12 have been implemented and verified:
 
 1. **Web Stop and Configuration Changes Preserving Buffer and Reporting Drain Status**:
-   - `stop_acquisition()` in [`services/daq_navi/web/app.py`](file:///home/mic-770/Apps/IIoT-data-ingest/services/daq_navi/web/app.py) initiates graceful termination via SIGTERM, unlinks PID/mode tracking files, and inspects the spool runtime status. It returns `drained: bool`, `pending_replay: bool`, and `pending_batches: int`. All committed SQLite spool batches remain preserved on disk.
+   - `stop_acquisition()` in [`services/daq_navi/web/app.py`](../../../services/daq_navi/web/app.py) initiates graceful termination via SIGTERM, unlinks PID/mode tracking files, and inspects the spool runtime status. It returns `drained: bool`, `pending_replay: bool`, and `pending_batches: int`. All committed SQLite spool batches remain preserved on disk.
    - `save_config()` checks if an acquisition process is active, executes `stop_acquisition(manual=False)` to drain, restarts acquisition with the saved mode, and returns `drained`, `pending_replay`, and `pending_batches` in the response payload. If acquisition was idle, it similarly reads the existing spool runtime state to report drain status.
 
 2. **Reboot Auto-Start Controlled by Saved Configuration**:
@@ -30,7 +30,7 @@ All acceptance criteria for Ticket 12 have been implemented and verified:
    - The child process can be restarted explicitly or via configured reboot without falling back to mockup.
 
 4. **Testing and Verification**:
-   - Strengthened and added comprehensive unit tests in [`services/daq_navi/tests/test_production_web.py`](file:///home/mic-770/Apps/IIoT-data-ingest/services/daq_navi/tests/test_production_web.py) covering:
+   - Strengthened and added comprehensive unit tests in [`services/daq_navi/tests/test_production_web.py`](../../../services/daq_navi/tests/test_production_web.py) covering:
      - `test_start_already_running_rejected`
      - `test_start_invalid_mode_rejected`
      - `test_start_explicit_mockup_launches_mockup_script`
@@ -47,5 +47,4 @@ All acceptance criteria for Ticket 12 have been implemented and verified:
      - `test_reboot_auto_start_disabled_does_not_start`
      - `test_stop_reports_drained_and_pending_replay`
    - All 26 tests pass via `docker exec daq_navi python3 -m unittest tests.test_production_web -v`.
-
 

@@ -45,12 +45,10 @@ class TestConfigReliabilityPhase1(unittest.TestCase):
             "INFLUX_TOKEN": self.sentinel_influx,
             "INFLUX_MEASUREMENT": "test_meas",
             "MQTT_BROKER": "10.0.0.99",
-            "MQTT_PORT": 1883,
-            "MQTT_TOPIC": "daq/test",
-            "MQTT_QOS": 0,
+            "MQTT_PORT": 8883,
             "MQTT_USERNAME": "test_mqtt_user",
             "MQTT_PASSWORD": self.sentinel_mqtt,
-            "MQTT_TLS_ENABLED": False,
+            "MQTT_TLS_ENABLED": True,
             "AUTO_START_MODE": "production",
             "AUTO_START_ON_STARTUP": False,
             "CHANNELS": {
@@ -363,45 +361,6 @@ class TestConfigReliabilityPhase1(unittest.TestCase):
             # Must NOT stop running acquisition
             mock_stop.assert_not_called()
 
-    def test_drain_failure_recovers_prior_acquisition_on_old_config(self):
-        """Ticket 04: If draining old spool fails, attempt to restart old acquisition and report outcome."""
-        payload = self.client.get("/api/config").get_json()
-        payload["DESTINATION"] = "influxdb"
-        payload["INFLUX_URL"] = "http://localhost:8086"
-        payload["INFLUX_TOKEN"] = "token"
-
-        with patch.object(web_module, "get_running_process", return_value=(12345, "production")), \
-             patch.object(web_module, "_test_destination", return_value="ok"), \
-             patch.object(web_module, "stop_acquisition", return_value={"stopped": True}), \
-             patch.object(web_module, "drain_spool_for_destination_switch", side_effect=Exception("Disk full on drain")), \
-             patch.object(web_module, "start_acquisition", return_value={"started": True, "pid": 54321, "mode": "production"}) as mock_start:
-
-            res = self.client.post("/api/config", json=payload)
-            self.assertEqual(res.status_code, 503)
-            data = res.get_json()
-            self.assertIn("Could not drain", data.get("message", ""))
-            self.assertTrue(data.get("resumed"))
-            mock_start.assert_called_once_with("production")
-
-    def test_spool_metadata_failure_restores_owner_and_previous_run(self):
-        payload = self.client.get("/api/config").get_json()
-        payload["DESTINATION"] = "influxdb"
-        payload["INFLUX_URL"] = "http://localhost:8086"
-        payload["INFLUX_TOKEN"] = "token"
-        with patch.object(web_module, "_test_destination", return_value="ok"), \
-             patch.object(web_module, "get_running_process", return_value=(12345, "production")), \
-             patch.object(web_module, "stop_acquisition", return_value={"stopped": True}), \
-             patch.object(web_module, "drain_spool_for_destination_switch"), \
-             patch.object(web_module, "update_spool_owner", side_effect=[OSError("metadata fault"), None]) as owner, \
-             patch.object(web_module, "start_acquisition", return_value={"started": True, "mode": "production"}) as start:
-            res = self.client.post("/api/config", json=payload)
-        self.assertEqual(res.status_code, 503)
-        self.assertTrue(res.get_json()["spool_owner_restored"])
-        self.assertTrue(res.get_json()["resumed"])
-        self.assertEqual(json.loads(self.config_path.read_text())["DESTINATION"], "postgresql")
-        self.assertEqual(owner.call_count, 2)
-        start.assert_called_once_with("production")
-
     def test_new_destination_start_failure_reports_persisted_stopped_config(self):
         payload = self.client.get("/api/config").get_json()
         payload["DESTINATION"] = "influxdb"
@@ -410,8 +369,6 @@ class TestConfigReliabilityPhase1(unittest.TestCase):
         with patch.object(web_module, "_test_destination", return_value="ok"), \
              patch.object(web_module, "get_running_process", return_value=(12345, "production")), \
              patch.object(web_module, "stop_acquisition", return_value={"stopped": True}), \
-             patch.object(web_module, "drain_spool_for_destination_switch"), \
-             patch.object(web_module, "update_spool_owner"), \
              patch.object(web_module, "start_acquisition", return_value={"started": False, "message": "failed"}):
             res = self.client.post("/api/config", json=payload)
         self.assertEqual(res.status_code, 503)

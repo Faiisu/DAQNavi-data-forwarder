@@ -3,12 +3,11 @@
 """
 test_destinations.py
 ────────────────────
-Tests for Ticket 05: MQTT and InfluxDB output destinations.
-- MQTTClient includes device_id in JSON payload
+Tests for legacy database and InfluxDB mockup destinations.
 - InfluxDBClient tags points with device_id in line protocol
 - DESTINATION config selection and shared send_samples interface
 - Reading connection parameters from config
-- Mockup pipeline verification for mqtt and influxdb destinations
+- Mockup pipeline verification for PostgreSQL and InfluxDB destinations
 """
 
 import json
@@ -29,7 +28,6 @@ for p in (CORE_DIR, SERVICE_DIR, PROJECT_ROOT):
 
 from config_loader import load_daq_config, DaqNaviConfig
 from buffered_daq_to_timescaledb import (
-    MQTTClient,
     InfluxDBClient,
     TimescaleDBClient,
     create_destination_client,
@@ -65,20 +63,6 @@ class TestDestinations(unittest.TestCase):
         client_pg = create_destination_client(cfg_pg)
         self.assertIsInstance(client_pg, TimescaleDBClient)
 
-        # Test mqtt
-        cfg_mqtt = DaqNaviConfig({
-            **self.cfg.raw,
-            "DESTINATION": "mqtt",
-            "MQTT_BROKER": "broker.example.com",
-            "MQTT_PORT": 1883,
-            "MQTT_TOPIC": "test/topic"
-        })
-        client_mqtt = create_destination_client(cfg_mqtt)
-        self.assertIsInstance(client_mqtt, MQTTClient)
-        self.assertEqual(client_mqtt.broker, "broker.example.com")
-        self.assertEqual(client_mqtt.port, 1883)
-        self.assertEqual(client_mqtt.topic, "test/topic")
-
         # Test influxdb
         cfg_influx = DaqNaviConfig({
             **self.cfg.raw,
@@ -99,52 +83,12 @@ class TestDestinations(unittest.TestCase):
         # All three clients must have send_samples, rollback, and disconnect methods
         clients = [
             TimescaleDBClient("postgresql://localhost/dummy", MagicMock()),
-            MQTTClient("localhost", 1883, "topic"),
             InfluxDBClient("http://localhost:8086", "token", "org", "bucket")
         ]
         for c in clients:
             self.assertTrue(callable(getattr(c, "send_samples", None)), f"{c.__class__.__name__} missing send_samples")
             self.assertTrue(callable(getattr(c, "rollback", None)), f"{c.__class__.__name__} missing rollback")
             self.assertTrue(callable(getattr(c, "disconnect", None)), f"{c.__class__.__name__} missing disconnect")
-
-    def test_mqtt_client_send_samples_includes_device_id(self):
-        client = MQTTClient(
-            broker="localhost",
-            port=1883,
-            topic="daq/telemetry",
-            qos=1,
-            client_id="test_client"
-        )
-        client.client = MagicMock()
-        client.is_connected = True
-        mock_publish_result = MagicMock()
-        mock_publish_result.rc = 0
-        client.client.publish.return_value = mock_publish_result
-
-        test_ts = datetime(2026, 9, 23, 12, 0, 0, tzinfo=timezone.utc)
-        rows = [
-            (test_ts, "pci1716-0", 0, 2.45),
-            (test_ts, "pci1716-0", 1, 3.14)
-        ]
-
-        client.send_samples(rows)
-
-        client.client.publish.assert_called_once()
-        call_topic, call_payload = client.client.publish.call_args[0][0], client.client.publish.call_args[0][1]
-        self.assertEqual(call_topic, "daq/telemetry")
-        payload = json.loads(call_payload)
-        self.assertEqual(len(payload), 2)
-        
-        # Verify first item matches {"time": "...", "device_id": "pci1716-0", "channel": 0, "value": 2.45}
-        self.assertEqual(payload[0]["time"], test_ts.isoformat())
-        self.assertEqual(payload[0]["device_id"], "pci1716-0")
-        self.assertEqual(payload[0]["channel"], 0)
-        self.assertAlmostEqual(payload[0]["value"], 2.45, places=2)
-
-        # Verify second item
-        self.assertEqual(payload[1]["device_id"], "pci1716-0")
-        self.assertEqual(payload[1]["channel"], 1)
-        self.assertAlmostEqual(payload[1]["value"], 3.14, places=2)
 
     def test_influxdb_client_line_protocol_tags_device_id(self):
         client = InfluxDBClient(
@@ -224,50 +168,10 @@ class TestDestinations(unittest.TestCase):
         self.assertEqual(len(rows), self.cfg.CHANNEL_COUNT)
         self.assertEqual(rows[0][1], "pci1716-0")
 
-        # Test passing rows to MQTTClient formatting
-        mqtt_client = MQTTClient("localhost", 1883, "test")
-        mqtt_client.client = MagicMock()
-        mqtt_client.is_connected = True
-        mock_res = MagicMock()
-        mock_res.rc = 0
-        mqtt_client.client.publish.return_value = mock_res
-        mqtt_client.send_samples(rows)
-
-        call_payload = mqtt_client.client.publish.call_args[0][1]
-        payload = json.loads(call_payload)
-        self.assertEqual(payload[0]["device_id"], "pci1716-0")
-
         # Test passing rows to InfluxDBClient formatting
         influx_client = InfluxDBClient("http://localhost:8086", "token", "org", "bucket")
         line = influx_client.format_line(rows[0])
         self.assertIn("device_id=pci1716-0", line)
-
-    @patch("mockup_stream_to_db.create_destination_client")
-    def test_mockup_writer_thread_mqtt_execution(self, mock_factory):
-        mock_client = MagicMock()
-        mock_client.connect.return_value = True
-        mock_factory.return_value = mock_client
-
-        # Put a test batch into mockup queue
-        test_batch = (time.time_ns(), [3.0] * self.cfg.CHANNEL_COUNT, self.cfg.CHANNEL_COUNT)
-        mockup_stream_to_db.data_queue.put(test_batch)
-
-        # Run writer thread for 1 batch
-        with patch.object(mockup_stream_to_db, 'config', self.cfg):
-            mockup_stream_to_db.stop_event.clear()
-            writer_t = threading.Thread(target=mockup_stream_to_db.db_writer_thread)
-            writer_t.start()
-
-            # Allow time to process
-            time.sleep(0.3)
-            mockup_stream_to_db.stop_event.set()
-            writer_t.join(timeout=2.0)
-
-        # Verify client was called with send_samples
-        self.assertTrue(mock_client.send_samples.called)
-        sent_rows = mock_client.send_samples.call_args[0][0]
-        self.assertGreater(len(sent_rows), 0)
-        self.assertEqual(sent_rows[0][1], "pci1716-0")
 
     @patch("mockup_stream_to_db.create_destination_client")
     def test_mockup_writer_thread_influxdb_execution(self, mock_factory):
@@ -292,52 +196,6 @@ class TestDestinations(unittest.TestCase):
         self.assertGreater(len(sent_rows), 0)
         self.assertEqual(sent_rows[0][1], "pci1716-0")
 
-    def test_live_mqtt_socket_transport(self):
-        import socket
-        received_payloads = []
-        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        # Find an open port
-        server.bind(("127.0.0.1", 0))
-        port = server.getsockname()[1]
-        server.listen(1)
-
-        def broker_mock():
-            try:
-                conn, _ = server.accept()
-                conn.settimeout(2.0)
-                conn.recv(1024)
-                conn.sendall(bytes([0x20, 0x02, 0x00, 0x00]))  # CONNACK
-                for _ in range(5):
-                    pub = conn.recv(4096)
-                    idx = pub.find(b'[{"time"')
-                    if idx != -1:
-                        received_payloads.append(pub[idx:].decode("utf-8", errors="ignore"))
-                        break
-                conn.close()
-            except Exception:
-                pass
-            finally:
-                server.close()
-
-        broker_thread = threading.Thread(target=broker_mock)
-        broker_thread.start()
-
-        client = MQTTClient(broker="127.0.0.1", port=port, topic="daq/telemetry", client_id="live_test")
-        connected = client.connect()
-        self.assertTrue(connected)
-
-        sample_ts = datetime(2026, 9, 23, 12, 0, 0, tzinfo=timezone.utc)
-        client.send_samples([(sample_ts, "pci1716-0", 0, 2.45)])
-        time.sleep(0.2)
-        client.disconnect()
-        broker_thread.join(timeout=2.0)
-
-        self.assertEqual(len(received_payloads), 1)
-        data = json.loads(received_payloads[0])
-        self.assertEqual(data[0]["device_id"], "pci1716-0")
-        self.assertEqual(data[0]["channel"], 0)
-        self.assertAlmostEqual(data[0]["value"], 2.45, places=2)
 
     def test_live_influxdb_http_transport(self):
         from http.server import HTTPServer, BaseHTTPRequestHandler

@@ -176,10 +176,8 @@ class DaqNaviConfig:
         self.INFLUX_TOKEN = env("INFLUX_TOKEN", config_dict.get("INFLUX_TOKEN", ""))
         
         # MQTT
-        self.MQTT_BROKER = env("MQTT_BROKER", config_dict.get("MQTT_BROKER", "localhost"))
-        self.MQTT_PORT = int(env("MQTT_PORT", config_dict.get("MQTT_PORT", 1883)))
-        self.MQTT_TOPIC = env("MQTT_TOPIC", config_dict.get("MQTT_TOPIC", "daq/telemetry"))
-        self.MQTT_QOS = int(env("MQTT_QOS", config_dict.get("MQTT_QOS", 0)))
+        self.MQTT_BROKER = env("MQTT_BROKER", config_dict.get("MQTT_BROKER", ""))
+        self.MQTT_PORT = int(env("MQTT_PORT", config_dict.get("MQTT_PORT", 8883)))
         self.MQTT_USERNAME = env("MQTT_USERNAME", config_dict.get("MQTT_USERNAME", ""))
         self.MQTT_PASSWORD = env("MQTT_PASSWORD", config_dict.get("MQTT_PASSWORD", ""))
         self.MQTT_TLS_ENABLED = (_get_bool_env("MQTT_TLS_ENABLED", config_dict.get("MQTT_TLS_ENABLED", False))
@@ -187,6 +185,9 @@ class DaqNaviConfig:
         self.MQTT_CA_CERTS = env("MQTT_CA_CERTS", config_dict.get("MQTT_CA_CERTS", ""))
         self.MQTT_CLIENT_CERT = env("MQTT_CLIENT_CERT", config_dict.get("MQTT_CLIENT_CERT", ""))
         self.MQTT_CLIENT_KEY = env("MQTT_CLIENT_KEY", config_dict.get("MQTT_CLIENT_KEY", ""))
+        self.MQTT_PRODUCTION_QOS = int(env("MQTT_PRODUCTION_QOS", config_dict.get("MQTT_PRODUCTION_QOS", 1)))
+        self.MQTT_PRODUCTION_TOPIC_PREFIX = env("MQTT_PRODUCTION_TOPIC_PREFIX", config_dict.get("MQTT_PRODUCTION_TOPIC_PREFIX", "daq/production/v1"))
+        self.MQTT_PRODUCTION_MAX_PAYLOAD_BYTES = int(env("MQTT_PRODUCTION_MAX_PAYLOAD_BYTES", config_dict.get("MQTT_PRODUCTION_MAX_PAYLOAD_BYTES", 256 * 1024)))
         
         # Operational
         self.STATS_INTERVAL_SEC = int(config_dict.get("STATS_INTERVAL_SEC", 10))

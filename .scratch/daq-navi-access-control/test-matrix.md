@@ -43,7 +43,7 @@ Status Legend:
 | **SEC-01** | Normal startup with valid secrets | Salted hash and session key provided in secure files/env | App starts cleanly, auth middleware active | Unit / E2E | `[x] PASS` |
 | **SEC-02** | Fail-closed: missing password hash | Password secret missing or empty | Process exits with non-zero code, logs error without starting server | Unit | `[x] PASS` |
 | **SEC-03** | Fail-closed: missing session key | Session secret missing or empty | Process exits with non-zero code | Unit | `[x] PASS` |
-| **SEC-04** | No default credentials | Fresh deployment without secrets | Refuses to start, no default credentials (e.g. `admin:admin`) exist | Security | `[x] PASS` |
+| **SEC-04** | No hardcoded authentication fallback | Start the application without an operator hash or session key, outside Compose defaults | Refuses to start. The example Compose deployment supplies an initial operator credential; rotate it after first login as documented in `DEPLOY_LINUX.md` | Security | `[x] PASS` |
 
 ### Group B: Authentication Flow & Session Lifecycle
 

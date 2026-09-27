@@ -4,10 +4,9 @@
 test_docker_compose.py
 ───────────────────────
 Tests for independent infrastructure, DAQ, and Portal Compose deployments.
-- Verifies docker-compose.yml defines: timescaledb, mqtt-broker, influxdb
+- Verifies docker-compose.yml defines: timescaledb and influxdb
 - Verifies TimescaleDB auto-initialization with db_setup.sql
 - Verifies daq-navi container: privileged, /dev, /usr/lib, /etc/biobdaq, config.json bind-mount
-- Verifies mosquitto.conf for anonymous local access
 - Verifies each deployment has its own environment template
 - Verifies daq-navi Dockerfile and entrypoint script
 - Verifies config_loader environment variable overrides
@@ -36,7 +35,6 @@ class TestDockerComposeStack(unittest.TestCase):
         self.env_example_path = os.path.join(self.project_root, ".env.example")
         self.daq_compose_path = os.path.join(self.project_root, "deploy", "daq-navi", "compose.yml")
         self.portal_compose_path = os.path.join(self.project_root, "deploy", "portal", "compose.yml")
-        self.mosquitto_conf_path = os.path.join(self.project_root, "config", "mosquitto", "mosquitto.conf")
         self.dockerfile_path = os.path.join(self.project_root, "services", "daq_navi", "Dockerfile")
         self.entrypoint_path = os.path.join(self.project_root, "services", "daq_navi", "entrypoint.sh")
 
@@ -51,7 +49,7 @@ class TestDockerComposeStack(unittest.TestCase):
         with open(self.compose_path, "r", encoding="utf-8") as f:
             data = yaml.safe_load(f)
         services = data.get("services", {})
-        required = ["timescaledb", "mqtt-broker", "influxdb"]
+        required = ["timescaledb", "influxdb"]
         for req in required:
             self.assertIn(req, services, f"Required service '{req}' missing from docker-compose.yml")
         self.assertNotIn("daq-navi", services)
@@ -71,17 +69,6 @@ class TestDockerComposeStack(unittest.TestCase):
 
         # Verify healthcheck
         self.assertIn("healthcheck", tsdb, "timescaledb must configure healthcheck")
-
-    def test_mqtt_broker_service_configuration(self):
-        with open(self.compose_path, "r", encoding="utf-8") as f:
-            data = yaml.safe_load(f)
-        mqtt = data["services"]["mqtt-broker"]
-        self.assertIn("mosquitto", mqtt.get("image", ""))
-        
-        # Verify mosquitto.conf volume mount
-        volumes = mqtt.get("volumes", [])
-        has_conf = any("mosquitto.conf" in str(v) for v in volumes)
-        self.assertTrue(has_conf, "mqtt-broker must mount mosquitto.conf")
 
     def test_influxdb_service_configuration(self):
         with open(self.compose_path, "r", encoding="utf-8") as f:
@@ -120,18 +107,11 @@ class TestDockerComposeStack(unittest.TestCase):
         self.assertTrue(any("8080" in p for p in portal_ports), "portal must expose port 8080")
         
 
-    def test_mosquitto_conf_file(self):
-        self.assertTrue(os.path.exists(self.mosquitto_conf_path), f"Missing {self.mosquitto_conf_path}")
-        with open(self.mosquitto_conf_path, "r", encoding="utf-8") as f:
-            content = f.read()
-        self.assertIn("1883", content)
-        self.assertIn("allow_anonymous true", content)
-
     def test_env_example_file(self):
         self.assertTrue(os.path.exists(self.env_example_path), f"Missing {self.env_example_path}")
         with open(self.env_example_path, "r", encoding="utf-8") as f:
             content = f.read()
-        for k in ["POSTGRES_USER", "POSTGRES_PASSWORD", "POSTGRES_DB", "DB_PORT", "MQTT_PORT", "INFLUX_PORT", "INFLUX_TOKEN"]:
+        for k in ["POSTGRES_USER", "POSTGRES_PASSWORD", "POSTGRES_DB", "DB_PORT", "INFLUX_PORT", "INFLUX_TOKEN"]:
             self.assertIn(k, content, f"Missing key '{k}' in .env.example")
         self.assertNotIn("MOCKUP_MODE", content)
         self.assertNotIn("PORTAL_PORT", content)
@@ -159,9 +139,8 @@ class TestDockerComposeStack(unittest.TestCase):
         config_path = os.path.join(SERVICE_DIR, "config.json")
         base_cfg = load_daq_config(config_path)
         overrides = {
-            "MOCKUP_MODE": "true", "DESTINATION": "mqtt",
+            "MOCKUP_MODE": "true", "DESTINATION": "postgresql",
             "DB_DSN": "postgresql://test:test@timescaledb:5432/testdb",
-            "MQTT_BROKER": "broker.test.local",
             "INFLUX_URL": "http://influxdb:8086", "INFLUX_TOKEN": "token123",
         }
         with patch.dict(os.environ, overrides):

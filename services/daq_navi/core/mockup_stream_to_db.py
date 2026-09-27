@@ -34,9 +34,6 @@ try:
         Calibrator,
         DaqSampleParser,
         ensure_db_and_tables,
-        TimescaleDBClient,
-        MQTTClient,
-        InfluxDBClient,
         create_destination_client,
         check_pipeline_watchdog
     )
@@ -46,9 +43,6 @@ except ImportError:
         Calibrator,
         DaqSampleParser,
         ensure_db_and_tables,
-        TimescaleDBClient,
-        MQTTClient,
-        InfluxDBClient,
         create_destination_client,
         check_pipeline_watchdog
     )
@@ -324,10 +318,7 @@ def main():
     log.info(f"  Section Len : {config.SECTION_LENGTH} samples/ch")
     log.info(f"  Batch size  : {config.USER_BUFFER_SIZE} interleaved samples")
     log.info(f"  Target Table: {config.DB_TABLE}")
-    if dest == 'mqtt':
-        log.info(f"  MQTT Broker : {config.MQTT_BROKER}:{config.MQTT_PORT}")
-        log.info(f"  MQTT Topic  : {config.MQTT_TOPIC}")
-    elif dest in ('influxdb', 'influx'):
+    if dest in ('influxdb', 'influx'):
         log.info(f"  Influx URL  : {getattr(config, 'INFLUX_URL', 'http://localhost:8086')}")
         log.info(f"  Influx Org  : {getattr(config, 'INFLUX_ORG', 'mddp')}")
         log.info(f"  Influx Bucket: {getattr(config, 'INFLUX_BUCKET', 'daq_telemetry')}")

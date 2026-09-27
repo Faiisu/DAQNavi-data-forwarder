@@ -1,20 +1,14 @@
-# Interface Design Notes
+# Interface design system
 
-The Portal and DAQ Navi interfaces use a shared light dashboard theme: warm off-white page background, white cards, dark green text, muted gray labels, fine green-gray borders, and a restrained green accent. DAQ controls keep clear grouping for device, acquisition, channels/calibration, destination, and run status.
+The Portal and DAQNavi Config Center use related light dashboard layouts with different brand accents. The Portal uses a restrained green accent. DAQNavi uses Advantech blue for navigation and orange for primary highlights. Both use a warm off-white page, white cards, dark text, muted supporting labels, and thin borders. The DAQNavi login screen has a separate dark background.
 
-## Current tokens
+## Shared visual rules
 
-The Portal and DAQ styles define the shared values in their CSS `:root` blocks. Keep those existing variables in sync when changing the theme:
+- Keep content grouped by task, with clear labels and concise help text.
+- Use the existing semantic colors for success, warning, and error states.
+- Preserve readable contrast, visible keyboard focus, responsive layouts, and control labels.
+- Use the existing sans, display, and monospace typefaces for UI text, headings, and technical values.
 
-- `--paper`: page background
-- `--white`: card and control background
-- `--ink`: primary text
-- `--muted`: supporting text
-- `--line`: separators and borders
-- `--green`: primary action and brand accent
-- `--mint`: pale accent surface
-- `--sans` and `--mono`: interface and technical-data typefaces
+## Implementation sources
 
-Use semantic status colors for running, warning, and error states. Preserve readable contrast, visible keyboard focus, responsive layouts, and labels that describe controls. Avoid decorative scanlines or a dark console treatment; they do not match the current Portal/DAQ implementation.
-
-For component-specific behavior, the service HTML/CSS is the implementation source of truth: `services/portal/` and `services/daq_navi/web/`.
+CSS variables are maintained separately in `services/portal/style.css` and `services/daq_navi/web/static/config_center/style.css`. Keep shared neutrals and type choices coherent, but do not force each service to use the same accent tokens. The service HTML and CSS are authoritative for component behavior.

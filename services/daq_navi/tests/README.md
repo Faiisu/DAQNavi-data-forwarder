@@ -1,18 +1,20 @@
-# Standalone DAQ script checks
+# DAQNavi tests and qualification
 
-Run the local script checks without touching production telemetry:
+## Automated tests
+
+Run the isolated DAQNavi unit and web tests with:
 
 ```bash
-.venv/bin/python -m unittest discover -s services/daq_navi/tests -p 'test_production*.py' -v
-.venv/bin/python -m unittest discover -s services/daq_navi/tests -p 'test_qualification_runner.py' -v
+.venv/bin/python -m unittest services.daq_navi.tests.test_production_mqtt_contract services.daq_navi.tests.test_production_acquisition services.daq_navi.tests.test_production_web services.daq_navi.tests.test_config_reliability services.daq_navi.tests.test_destination_connection services.daq_navi.tests.test_destinations services.daq_navi.tests.test_access_control -v
 ```
 
-The TimescaleDB check skips unless `DAQ_TEST_DB_DSN` names an existing, isolated
-database whose name starts with `daq_navi_test_`. With that variable set, rerun
-the first command to check idempotent writes and retention policy reconciliation.
-The legacy TimescaleDB policy tests have the same database guard.
+The MQTT contract suite checks validation, JSON fixtures, writer behavior, QoS completion, spool replay, and API behavior using isolated test doubles. It does not prove connectivity to a live MQTT broker or qualify physical throughput. The broader suite also does not replace hardware and destination qualification.
 
-On the host with the PCI-1716, use that isolated DSN for physical checks:
+Database-dependent tests require `DAQ_TEST_DB_DSN` to point to an isolated database whose name starts with `daq_navi_test_`. The tests skip when that guard is not satisfied. Never point qualification tests at a production database or spool.
+
+## Physical DAQ qualification
+
+On a host with the supported PCI-1716 device and SDK, set `DAQ_TEST_DB_DSN` to an isolated database and run:
 
 ```bash
 .venv/bin/python services/daq_navi/tests/qualify_standalone.py --rate 1000 --duration 30
@@ -21,13 +23,8 @@ On the host with the PCI-1716, use that isolated DSN for physical checks:
 .venv/bin/python services/daq_navi/tests/qualify_outage_replay.py --crash-first
 ```
 
-These commands require `DAQ_TEST_DB_DSN` in the environment. They create unique
-test tables and write reports under `.scratch/daq-navi-production/qualification/`.
-They never stop the shared database or alter `daq_db.daq_telemetry`. The physical
-run checks DAQ timing against this PC's clock, which is the local database host
-and production time authority.
+These commands write reports under `.scratch/daq-navi-production/qualification/` and use uniquely named test tables. Record device, channel span, destination, rates, duration, command output, and any skipped checks with the report. The physical test verifies the rate observed by the application; check the hardware manual and actual inter-sample timing before treating that value as the card's per-channel rate.
 
-The local SQLite spool is the recovery boundary: a batch is replayable after
-its disk commit. A process crash after a DAQ read but before that commit can
-lose the in-flight batch. The outage runner verifies replay of committed
-batches after process restart.
+## Recovery boundary
+
+A batch becomes replayable after its local SQLite spool commit. A process failure after a hardware read but before commit can lose the in-flight read. A destination outage leaves committed batches pending. MQTT QoS 1 waits for broker PUBACK before spool acknowledgment; QoS 0 waits for Paho `on_publish` and can lose messages after the client sends them. An isolated broker/consumer rehearsal is required to qualify a real broker deployment; the automated MQTT suite does not perform that external integration.

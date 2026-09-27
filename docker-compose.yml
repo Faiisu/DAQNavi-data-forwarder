@@ -20,17 +20,6 @@ services:
       timeout: 5s
       retries: 5
 
-  mqtt-broker:
-    image: eclipse-mosquitto:2
-    container_name: daq_mosquitto
-    restart: unless-stopped
-    ports:
-      - "${MQTT_PORT:-1883}:1883"
-    volumes:
-      - ./config/mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
-      - mosquitto_data:/mosquitto/data
-      - mosquitto_log:/mosquitto/log
-
   influxdb:
     image: influxdb:2
     container_name: daq_influxdb
@@ -50,8 +39,6 @@ services:
 
 volumes:
   tsdb_data:
-  mosquitto_data:
-  mosquitto_log:
   influxdb_data:
   influxdb_config:
 

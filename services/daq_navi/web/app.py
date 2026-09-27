@@ -694,37 +694,16 @@ def get_config():
 
 
 def drain_spool_for_destination_switch(old_config, new_config):
-    """While stopped, finish all old-backend writes before recording a new owner."""
+    """While stopped, close open gaps and record cutover for the new destination without draining to old sink."""
     old_cfg = DaqNaviConfig(old_config, allow_env_overrides=False)
     new_cfg = DaqNaviConfig(new_config, allow_env_overrides=False)
     if destination_identity(old_cfg) == destination_identity(new_cfg):
         return
-    cfg = old_cfg
-    spool = DurableSpool(Path(cfg.SPOOL_DIR), cfg.SPOOL_MAX_BYTES)
+    spool = DurableSpool(Path(old_cfg.SPOOL_DIR), old_cfg.SPOOL_MAX_BYTES)
     try:
-        open_gap = spool.conn.execute('SELECT 1 FROM gaps WHERE end_ns IS NULL LIMIT 1').fetchone()
-        has_records = bool(spool.pending_batches or spool.pending_gaps() or open_gap)
-        stored_destination = spool.state_value('destination') or ('postgresql' if has_records else None)
-        old_destination = 'influxdb' if cfg.DESTINATION == 'influxdb' else 'postgresql'
-        stored_identity = spool.state_value('destination_identity')
-        old_identity = destination_identity(cfg)
-        if has_records and stored_destination and stored_destination != old_destination:
-            raise AcquisitionFault(f"spool belongs to {stored_destination}, not the saved {old_destination} destination")
-        if has_records and stored_identity and stored_identity != old_identity:
-            raise AcquisitionFault('spool target identity does not match saved destination settings; refusing to redirect pending records')
-        if has_records and not stored_identity and old_destination != 'postgresql':
-            raise AcquisitionFault('legacy spool target is unknown; only PostgreSQL legacy ownership can be drained safely')
         spool.close_open_gaps_for_switch(time.time_ns())
-        sink = InfluxProductionDestination(cfg) if cfg.DESTINATION == 'influxdb' else TimescaleProductionDestination(cfg)
-        while spool.pending_batches or spool.pending_gaps():
-            batches = spool.oldest_many(1)
-            gaps = spool.pending_gaps()
-            rows = [row for _, batch in batches for row in batch]
-            sink.write(rows, gaps)
-            spool.acknowledge_many([batch_id for batch_id, _ in batches])
-            spool.acknowledge_gaps([gap['gap_id'] for gap in gaps])
-        if spool.pending_batches or spool.pending_gaps():
-            raise AcquisitionFault('Old destination still has pending spool records; destination was not switched.')
+        pending = spool.pending_batches + len(spool.pending_gaps())
+        spool.record_cutover(old_cfg.DESTINATION, new_cfg.DESTINATION, pending)
     finally:
         spool.close()
 
@@ -793,7 +772,7 @@ def _save_config_locked():
     pid, mode = get_running_process()
     was_running = pid is not None
     switch_stop_result = None
-    supported_sinks = {'postgresql', 'timescaledb', 'influxdb'}
+    supported_sinks = {'postgresql', 'timescaledb', 'database', 'influxdb', 'mqtt'}
     needs_identity = (
         current.get('AUTO_START_MODE', 'production') == 'production' or
         updated.get('AUTO_START_MODE', 'production') == 'production'
@@ -809,7 +788,7 @@ def _save_config_locked():
         destination_changed = current_identity != updated_identity
     retention_changed = ('DB_RETENTION_DAYS' in updated and
                          ('DB_RETENTION_DAYS' not in current or updated['DB_RETENTION_DAYS'] != previous_retention))
-    if destination_changed and updated.get('DESTINATION', 'postgresql') != 'influxdb':
+    if destination_changed and updated.get('DESTINATION', 'postgresql') in ('postgresql', 'timescaledb', 'database'):
         if retention_changed:
             return jsonify({'status': 'error', 'persisted': False,
                             'message': 'Save the destination and retention days in separate operations; no changes were applied.'}), 400
@@ -840,7 +819,7 @@ def _save_config_locked():
             outcome = 'resumed on previous configuration' if recovered and recovered.get('started') else 'recovery failed; acquisition remains stopped'
             return jsonify({'status': 'error', 'message': f'Could not drain the old destination spool: {auth.redact_error_message(str(exc), current, updated)}; {outcome}.', 'persisted': False, 'runtime': 'old configuration resumed' if recovered and recovered.get('started') else 'stopped', 'resumed': bool(recovered and recovered.get('started')), 'recovery': redact_response_values(recovered, current, updated)}), 503
     retention_applied = False
-    if retention_changed and updated.get('DESTINATION', 'postgresql') != 'influxdb':
+    if retention_changed and updated.get('DESTINATION', 'postgresql') in ('postgresql', 'timescaledb', 'database'):
         try:
             new_cfg = DaqNaviConfig(updated, allow_env_overrides=False)
             TimescaleProductionDestination(new_cfg).ensure_schema()
@@ -926,7 +905,9 @@ def _save_config_locked():
         if not start_result['started']:
             return jsonify({'status': 'error', 'persisted': True, 'runtime': 'stopped', 'message': 'Configuration is saved, but acquisition did not restart.', 'config': safe_config, **redact_response_values(start_result, current, updated)}), 503
         return jsonify({'status': 'success', 'config': safe_config,
-                        'retention': 'managed by InfluxDB bucket' if updated.get('DESTINATION') == 'influxdb' else 'TimescaleDB policy',
+                        'retention': ('managed by InfluxDB bucket' if updated.get('DESTINATION') == 'influxdb'
+                                      else 'managed by MQTT consumer / downstream broker' if updated.get('DESTINATION') == 'mqtt'
+                                      else 'TimescaleDB policy'),
                         'previous_session': {'stopped': True, 'drained': True,
                                              'pending_replay': False, 'pending_batches': 0},
                         'drained': True, 'pending_replay': False, 'pending_batches': 0})
@@ -973,9 +954,13 @@ def _save_config_locked():
 @app.route('/api/retention', methods=['GET'])
 def get_retention():
     config = read_config()
-    if config.get('DESTINATION', 'postgresql') == 'influxdb':
+    dest = config.get('DESTINATION', 'postgresql')
+    if dest == 'influxdb':
         return jsonify({'destination': 'influxdb', 'retention': 'managed by InfluxDB bucket',
                         'saved_days': None, 'message': 'Configure retention in the InfluxDB bucket settings.'})
+    if dest == 'mqtt':
+        return jsonify({'destination': 'mqtt', 'retention': 'managed by MQTT consumer / downstream broker',
+                        'saved_days': None, 'message': 'Retention and history are consumer managed.'})
     try:
         import psycopg2
         with psycopg2.connect(config['DB_DSN'], connect_timeout=3) as conn:
@@ -1070,24 +1055,27 @@ def _test_destination(settings):
         broker = str(value('MQTT_BROKER'))
         if not broker:
             raise ValueError('MQTT broker host is required.')
-        port = int(value('MQTT_PORT', 1883))
+        port = int(value('MQTT_PORT', 8883))
         if not 1 <= port <= 65535:
             raise ValueError('MQTT port must be between 1 and 65535.')
+        username = str(value('MQTT_USERNAME'))
+        password = str(value('MQTT_PASSWORD'))
+        if not username or not password:
+            raise ValueError('Production MQTT requires a broker username and password.')
+        if not value('MQTT_TLS_ENABLED', False):
+            raise ValueError('Production MQTT requires verified TLS.')
         client = mqtt.Client(
             mqtt.CallbackAPIVersion.VERSION2,
             client_id=f'daq-connection-test-{uuid.uuid4().hex[:8]}',
             reconnect_on_failure=False,
         )
         client.connect_timeout = 4.0
-        username = value('MQTT_USERNAME')
-        if username:
-            client.username_pw_set(username, value('MQTT_PASSWORD'))
-        if value('MQTT_TLS_ENABLED', False):
-            client.tls_set(
-                ca_certs=value('MQTT_CA_CERTS') or None,
-                certfile=value('MQTT_CLIENT_CERT') or None,
-                keyfile=value('MQTT_CLIENT_KEY') or None,
-            )
+        client.username_pw_set(username, password)
+        client.tls_set(
+            ca_certs=value('MQTT_CA_CERTS') or None,
+            certfile=value('MQTT_CLIENT_CERT') or None,
+            keyfile=value('MQTT_CLIENT_KEY') or None,
+        )
         connected = threading.Event()
         result = {'reason': None}
 
@@ -1172,9 +1160,26 @@ def get_status():
         'last_sample_ns': runtime.get('last_sample_ns'),
         'writer_error': writer_error,
         'gaps': read_recent_gaps(config),
-        'retention_days': (config.get('DB_RETENTION_DAYS', 30) if dest != 'influxdb' else None),
-        'retention': ('managed by InfluxDB bucket' if dest == 'influxdb' else 'TimescaleDB policy'),
+        'destination_cutovers': read_recent_cutovers(config),
+        'retention_days': (config.get('DB_RETENTION_DAYS', 30) if dest not in ('influxdb', 'mqtt') else None),
+        'retention': ('managed by InfluxDB bucket' if dest == 'influxdb'
+                      else 'managed by MQTT consumer / downstream broker' if dest == 'mqtt'
+                      else 'TimescaleDB policy'),
     }
+    if dest == 'mqtt' and mode_val == 'production':
+        runtime_matches_destination = runtime.get('destination') == dest
+        last_delivery_ns = runtime.get('last_delivery_ns') if runtime_matches_destination else None
+        delivery_state = ('stopped' if not is_running else
+                          'unavailable' if not fresh or not runtime_matches_destination else
+                          'error' if writer_error else
+                          'completed' if last_delivery_ns else
+                          'pending' if runtime.get('pending_batches', 0) else
+                          'idle')
+        status['mqtt_delivery'] = {
+            'state': delivery_state,
+            'last_completed_ns': last_delivery_ns,
+            'qos': config.get('MQTT_PRODUCTION_QOS', 1),
+        }
     return jsonify(status)
 
 
@@ -1195,6 +1200,19 @@ def read_recent_gaps(config):
         with sqlite3.connect(f'file:{path}?mode=ro', uri=True, timeout=1) as conn:
             rows = conn.execute('SELECT start_ns,end_ns,cause FROM gaps ORDER BY start_ns DESC LIMIT 20').fetchall()
         return [{'start_ns': start, 'end_ns': end, 'cause': cause} for start, end, cause in rows]
+    except (OSError, sqlite3.Error):
+        return []
+
+
+def read_recent_cutovers(config):
+    import sqlite3
+    path = Path(config.get('SPOOL_DIR', '/var/lib/daq_navi/spool')) / 'production-spool.sqlite3'
+    if not path.exists():
+        return []
+    try:
+        with sqlite3.connect(f'file:{path}?mode=ro', uri=True, timeout=1) as conn:
+            rows = conn.execute('SELECT time_ns, old_destination, new_destination, pending_records FROM cutovers ORDER BY time_ns DESC, id DESC LIMIT 5').fetchall()
+        return [{'time_ns': r[0], 'from': r[1], 'to': r[2], 'pending_records': r[3]} for r in rows]
     except (OSError, sqlite3.Error):
         return []
 
@@ -1223,6 +1241,14 @@ def get_samples():
     except ValueError as exc:
         return jsonify({'message': str(exc)}), 400
     config = read_config()
+    if config.get('DESTINATION') == 'mqtt':
+        return jsonify({
+            'destination': 'mqtt',
+            'channel': channel,
+            'points': [],
+            'gaps': read_recent_gaps(config),
+            'message': 'Sample history is managed by the external MQTT consumer; no local database history is queried.',
+        })
     if config.get('DESTINATION') == 'influxdb':
         try:
             def flux_quote(value):

@@ -194,6 +194,22 @@ h1 { margin-bottom: 5px; font: 800 clamp(24px, 2.4vw, 31px)/1.18 var(--display);
 .info-heading p { margin: 0; color: var(--muted); font-size: 9px; line-height: 1.4; }
 .info-row { display: flex; justify-content: space-between; gap: 8px; padding: 8px 0; border-top: 1px solid #eef1ef; color: var(--muted); font-size: 9px; }
 .info-row b { overflow: hidden; max-width: 60%; color: #394840; font: 500 9px var(--mono); text-align: right; text-overflow: ellipsis; white-space: nowrap; }
+.mqtt-contract-note { grid-column: 1 / -1; padding: 12px 13px; border: 1px solid #d9e7f2; border-radius: 6px; background: #f3f8fc; color: #465b6c; font-size: 10px; line-height: 1.55; }
+.mqtt-contract-note strong { display: block; margin-bottom: 5px; color: #1c527d; font: 700 10px var(--display); }
+.mqtt-contract-note p { margin: 5px 0 0; }
+.mqtt-contract-note code { padding: 1px 3px; border-radius: 3px; background: #e6eef5; color: #31536e; font: 9px var(--mono); }
+.mqtt-runtime-note { margin: 10px 0 0; color: var(--muted); font-size: 9px; line-height: 1.45; }
+.mqtt-gap-list { display: grid; gap: 6px; margin: 5px 0 0; padding: 0; list-style: none; }
+.mqtt-gap-list li { display: grid; gap: 2px; color: var(--muted); font-size: 8px; line-height: 1.4; }
+.mqtt-gap-list li strong { color: #46574d; font: 500 8px var(--mono); }
+.mqtt-gap-list li small { font-size: 8px; }
+.mqtt-cutover-block { margin-top: 12px; padding-top: 10px; border-top: 1px solid #eef1ef; }
+.mqtt-cutover-block > strong { color: #43544b; font-size: 9px; }
+.mqtt-cutover-block ul { display: grid; gap: 8px; margin: 8px 0 0; padding: 0; list-style: none; }
+.mqtt-cutover-block li { display: grid; gap: 3px; color: var(--muted); font-size: 8px; line-height: 1.4; }
+.mqtt-cutover-block time { font: 8px var(--mono); }
+.mqtt-cutover-block li strong { color: var(--ink); font-size: 9px; }
+.mqtt-cutover-block li small { color: var(--muted); font-size: 8px; }
 .wiring-note { display: grid; gap: 3px; padding: 9px 0; border-top: 1px solid #eef1ef; }
 .wiring-note b { color: #3c4d44; font-size: 10px; }
 .wiring-note span, .muted-note { color: var(--muted); font-size: 9px; line-height: 1.5; }
