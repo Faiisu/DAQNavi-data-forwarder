@@ -1,8 +1,0 @@
-__pycache__/
-*.pyc
-.daq_process.pid
-.daq_process.mode
-daq_pipeline.log
-.daq_desired_state.json
-*.db
-*.sqlite*

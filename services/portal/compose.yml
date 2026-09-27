@@ -1,9 +1,0 @@
-name: portal
-
-services:
-  portal:
-    build: .
-    container_name: daq_portal
-    restart: unless-stopped
-    ports:
-      - "${PORTAL_PORT:-8080}:80"

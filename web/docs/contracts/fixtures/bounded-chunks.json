@@ -1,0 +1,54 @@
+[
+  {
+    "schema_version": 1,
+    "device_id": "rack/one",
+    "batch_id": "batch-1700000000-002",
+    "chunk_id": "batch-1700000000-002:c0",
+    "samples": [
+      {
+        "time_ns": 1700000000000000000,
+        "sample_id": "run:0:0",
+        "session_id": "run",
+        "device_id": "rack/one",
+        "channel": 0,
+        "sensor_name": "Sensor 0",
+        "raw_voltage": 1.25,
+        "calibrated_value": 25.0,
+        "unit": "kPa",
+        "provenance": "physical_daq"
+      },
+      {
+        "time_ns": 1700000000000000001,
+        "sample_id": "run:0:1",
+        "session_id": "run",
+        "device_id": "rack/one",
+        "channel": 0,
+        "sensor_name": "Sensor 0",
+        "raw_voltage": 1.26,
+        "calibrated_value": 25.2,
+        "unit": "kPa",
+        "provenance": "physical_daq"
+      }
+    ]
+  },
+  {
+    "schema_version": 1,
+    "device_id": "rack/one",
+    "batch_id": "batch-1700000000-002",
+    "chunk_id": "batch-1700000000-002:c1",
+    "samples": [
+      {
+        "time_ns": 1700000000000000002,
+        "sample_id": "run:0:2",
+        "session_id": "run",
+        "device_id": "rack/one",
+        "channel": 0,
+        "sensor_name": "Sensor 0",
+        "raw_voltage": 1.27,
+        "calibrated_value": 25.4,
+        "unit": "kPa",
+        "provenance": "physical_daq"
+      }
+    ]
+  }
+]

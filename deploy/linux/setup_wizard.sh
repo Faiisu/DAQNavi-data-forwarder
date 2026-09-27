@@ -1,1 +1,0 @@
-../../scripts/setup_wizard.sh
