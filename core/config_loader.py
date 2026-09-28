@@ -98,6 +98,12 @@ def infer_db_connection_mode(config_dict: dict) -> str:
     return "dsn"
 
 
+def validate_finite_number(value, context: str) -> None:
+    """Reject booleans and non-finite calibration values consistently."""
+    if type(value) not in (int, float) or not math.isfinite(value):
+        raise ValueError(f"{context} must be a finite number")
+
+
 def validate_config_values(config: dict) -> None:
     """Validate saved value types and ranges shared by web edits and acquisition."""
     for key in ("START_CHANNEL", "CHANNEL_COUNT", "CLOCK_RATE", "SECTION_LENGTH",
@@ -121,8 +127,8 @@ def validate_config_values(config: dict) -> None:
             raise ValueError(f"channel {name} enabled must be a boolean")
         scale = channel.get("scale", {})
         for field in ("low_voltage", "high_voltage", "low_value", "high_value"):
-            if field in scale and (type(scale[field]) not in (int, float) or not math.isfinite(scale[field])):
-                raise ValueError(f"channel {name} {field} must be a finite number")
+            if field in scale:
+                validate_finite_number(scale[field], f"channel {name} {field}")
 
 class ChannelConfig:
     def __init__(self, channel_id: int, raw_dict: dict):

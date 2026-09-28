@@ -529,6 +529,12 @@ class ProductionAcquisitionTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "channel 2 scale"):
             DaqNaviConfig(raw)
 
+    def test_effective_calibration_must_remain_finite(self):
+        cfg = configuration()
+        cfg.channels[2].low_voltage = float('inf')
+        with self.assertRaisesRegex(ValueError, 'channel 2 calibration low_voltage'):
+            validate_production_config(cfg)
+
     def test_finite_section_count_is_rejected_for_continuous_acquisition(self):
         with self.assertRaisesRegex(ValueError, "SECTION_COUNT"):
             validate_production_config(configuration(SECTION_COUNT=1))

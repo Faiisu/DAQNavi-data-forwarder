@@ -287,6 +287,32 @@ def prepare_base_config() -> Dict[str, Any]:
     return base
 
 
+def stop_after_first_sample(spool_dir, stop_event, capture_seconds, destination):
+    """Start the hardware capture window only after the first committed sample."""
+    first_sample_seen = threading.Event()
+
+    def stopper():
+        status_path = Path(spool_dir) / "status.json"
+        startup_deadline = time.monotonic() + 30
+        while time.monotonic() < startup_deadline:
+            try:
+                status = json.loads(status_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                status = {}
+            if status.get("last_sample_ns") is not None:
+                first_sample_seen.set()
+                break
+            if stop_event.wait(0.1):
+                return
+        if first_sample_seen.is_set():
+            stop_event.wait(capture_seconds)
+        log.info("Stopping physical capture for %s test...", destination)
+        stop_event.set()
+
+    threading.Thread(target=stopper, daemon=True).start()
+    return first_sample_seen
+
+
 # ----------------------------------------------------------------------
 # Phase 3: Hardware Data Pipeline -> TimescaleDB / PostgreSQL
 # ----------------------------------------------------------------------
@@ -308,14 +334,7 @@ def test_phase_3_timescaledb():
 
     with tempfile.TemporaryDirectory(prefix="daq_e2e_spool_pg_") as spool_dir:
         stop_event = threading.Event()
-        
-        # Run physical capture for 6 seconds
-        def stopper():
-            time.sleep(6)
-            log.info("Stopping physical capture for TimescaleDB test...")
-            stop_event.set()
-
-        threading.Thread(target=stopper, daemon=True).start()
+        first_sample_seen = stop_after_first_sample(spool_dir, stop_event, 6, "TimescaleDB")
         start_mono = time.monotonic()
         run_res = run_production(cfg, stop_event=stop_event, daq_factory=AdvantechDaq, spool_dir=spool_dir)
         elapsed = time.monotonic() - start_mono
@@ -323,8 +342,9 @@ def test_phase_3_timescaledb():
         record_result(
             "Phase 3",
             "Physical DAQ acquisition completed and spool drained",
-            run_res["pending_batches"] == 0 and len(run_res["writer_errors"]) == 0,
-            {"run_res": run_res, "elapsed_s": round(elapsed, 2)},
+            first_sample_seen.is_set() and run_res["pending_batches"] == 0 and len(run_res["writer_errors"]) == 0,
+            {"run_res": run_res, "elapsed_s": round(elapsed, 2),
+             "first_sample_seen": first_sample_seen.is_set()},
         )
 
         # Verify in TimescaleDB database
@@ -410,21 +430,16 @@ def test_phase_4_influxdb():
 
     with tempfile.TemporaryDirectory(prefix="daq_e2e_spool_influx_") as spool_dir:
         stop_event = threading.Event()
-        
-        def stopper():
-            time.sleep(5)
-            log.info("Stopping physical capture for InfluxDB test...")
-            stop_event.set()
-
-        threading.Thread(target=stopper, daemon=True).start()
+        first_sample_seen = stop_after_first_sample(spool_dir, stop_event, 5, "InfluxDB")
         run_res = run_production(cfg, stop_event=stop_event, daq_factory=AdvantechDaq, spool_dir=spool_dir)
 
-        spool_drained = (run_res["pending_batches"] == 0 and len(run_res["writer_errors"]) == 0)
+        spool_drained = (first_sample_seen.is_set() and run_res["pending_batches"] == 0
+                         and len(run_res["writer_errors"]) == 0)
         record_result(
             "Phase 4",
             "InfluxDB physical acquisition run & spool drain",
             spool_drained,
-            {"run_res": run_res},
+            {"run_res": run_res, "first_sample_seen": first_sample_seen.is_set()},
         )
 
         # Query InfluxDB 2.x via Flux query
@@ -517,13 +532,7 @@ def test_phase_5_mqtt():
 
     with tempfile.TemporaryDirectory(prefix="daq_e2e_spool_mqtt_") as spool_dir:
         stop_event = threading.Event()
-        
-        def stopper():
-            time.sleep(5)
-            log.info("Stopping physical capture for MQTT test...")
-            stop_event.set()
-
-        threading.Thread(target=stopper, daemon=True).start()
+        first_sample_seen = stop_after_first_sample(spool_dir, stop_event, 5, "MQTT")
         run_res = run_production(cfg, stop_event=stop_event, daq_factory=AdvantechDaq, spool_dir=spool_dir)
 
         # Allow subscriber to receive inflight messages
@@ -551,8 +560,9 @@ def test_phase_5_mqtt():
         record_result(
             "Phase 5",
             "MQTT delivery & Contract v1 compliance (TLS QoS 1)",
-            messages_received and all_contract_v1 and has_required_keys and sample_keys_valid and run_res["pending_batches"] == 0,
+            first_sample_seen.is_set() and messages_received and all_contract_v1 and has_required_keys and sample_keys_valid and run_res["pending_batches"] == 0,
             {
+                "first_sample_seen": first_sample_seen.is_set(),
                 "messages_received": len(received_messages),
                 "total_samples": total_samples_delivered,
                 "schema_version_1": all_contract_v1,

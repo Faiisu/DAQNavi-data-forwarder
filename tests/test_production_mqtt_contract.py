@@ -201,6 +201,18 @@ class ProductionMqttWriterTests(unittest.TestCase):
         self.assertFalse(thread.is_alive())
         self.assertIsInstance(result['error'], Exception)
 
+    def test_gap_publish_rejection_is_reported_to_spool_caller(self):
+        broker = Broker()
+        broker.publish_rc = 4
+        gap = {'gap_id': 'gap-1', 'revision': 1, 'start_ns': 100,
+               'end_ns': None, 'cause': 'broker_outage'}
+        broker, thread, result = self.write_in_thread(mqtt_config(), [], [gap], broker)
+        broker.wait_for_messages(1)
+        thread.join(2)
+        self.assertFalse(thread.is_alive())
+        self.assertIsInstance(result['error'], RuntimeError)
+        self.assertIn('code 4', str(result['error']))
+
     def test_oversized_single_sample_is_rejected_before_any_publication(self):
         class ImmediateAckBroker(Broker):
             def publish(self, *args, **kwargs):
