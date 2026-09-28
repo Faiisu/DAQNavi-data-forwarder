@@ -2,6 +2,8 @@
 
 DAQNavi lets an operator configure an Advantech DAQ device, collect analog measurements, and deliver them to an existing PostgreSQL/TimescaleDB, InfluxDB 2.x, or MQTT destination. A persistent SQLite spool holds committed production records until delivery completes.
 
+![Example Config Center screen showing device and sensor settings](image.png)
+
 ## Prerequisites
 
 - Linux host with Docker Engine, the Docker Compose plugin, and OpenSSL for generating a session key. The Docker image includes Python 3.12. See [host preparation and installation](DEPLOY.md#prepare-the-linux-host) for install instructions.
