@@ -10,6 +10,7 @@ and maps string enums to Advantech BDaq constants.
 import os
 import json
 import logging
+import math
 import urllib.parse
 from types import SimpleNamespace
 
@@ -95,6 +96,33 @@ def infer_db_connection_mode(config_dict: dict) -> str:
             return "fields"
 
     return "dsn"
+
+
+def validate_config_values(config: dict) -> None:
+    """Validate saved value types and ranges shared by web edits and acquisition."""
+    for key in ("START_CHANNEL", "CHANNEL_COUNT", "CLOCK_RATE", "SECTION_LENGTH",
+                "SECTION_COUNT", "SPOOL_MAX_BYTES", "DB_RETENTION_DAYS"):
+        if key in config and type(config[key]) is not int:
+            raise ValueError(f"{key} must be an integer")
+    if type(config.get("AUTO_START_ON_STARTUP", False)) is not bool:
+        raise ValueError("AUTO_START_ON_STARTUP must be a boolean")
+    if config.get("AUTO_START_MODE", "production") not in ("production", "mockup"):
+        raise ValueError("AUTO_START_MODE must be production or mockup")
+    if "DB_CONNECTION_MODE" in config and config["DB_CONNECTION_MODE"] not in ("fields", "dsn"):
+        raise ValueError("DB_CONNECTION_MODE must be fields or dsn")
+    if config.get("DB_RETENTION_DAYS", 30) < 1:
+        raise ValueError("DB_RETENTION_DAYS must be at least one day")
+    if config.get("CHANNEL_COUNT", 4) < 1 or config.get("SECTION_LENGTH", 500) < 1:
+        raise ValueError("CHANNEL_COUNT and SECTION_LENGTH must be positive")
+    if not 1000 <= config.get("CLOCK_RATE", 2000) <= 2000:
+        raise ValueError("CLOCK_RATE must be 1000–2000 Hz per channel")
+    for name, channel in config.get("CHANNELS", {}).items():
+        if type(channel.get("enabled")) is not bool:
+            raise ValueError(f"channel {name} enabled must be a boolean")
+        scale = channel.get("scale", {})
+        for field in ("low_voltage", "high_voltage", "low_value", "high_value"):
+            if field in scale and (type(scale[field]) not in (int, float) or not math.isfinite(scale[field])):
+                raise ValueError(f"channel {name} {field} must be a finite number")
 
 class ChannelConfig:
     def __init__(self, channel_id: int, raw_dict: dict):

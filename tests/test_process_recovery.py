@@ -42,7 +42,7 @@ class ProcessRecoveryTests(unittest.TestCase):
                      'AUTO_START_ON_STARTUP': False, 'AUTO_START_MODE': 'production',
                      'DESTINATION': 'postgresql'}), \
                  patch.object(web, 'read_runtime_status', return_value={
-                     'checked_at_ns': time.time_ns(), 'state': 'running'}), \
+                     'pid': 710, 'checked_at_ns': time.time_ns(), 'state': 'running'}), \
                  patch.object(web, 'read_recent_gaps', return_value=[]):
                 client = web.app.test_client()
                 _, cookie = web.session_store.create_session('recovery_test_operator')

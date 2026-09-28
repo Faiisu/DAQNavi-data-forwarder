@@ -222,38 +222,10 @@ def redact_error_message(message: str, *configs: Dict[str, Any]) -> str:
     return redact_dsn_password(cleaned)
 
 
-def infer_db_connection_mode(config: Dict[str, Any]) -> str:
-    """
-    Deterministic migration rule for existing configurations without DB_CONNECTION_MODE.
-    If DB_DSN equals the standard DSN derived from DB_HOST, DB_PORT, DB_NAME, DB_USER,
-    and DB_PASSWORD, it is 'fields' mode. Otherwise it is preserved as custom 'dsn' mode.
-    """
-    explicit = config.get("DB_CONNECTION_MODE")
-    if explicit in ("fields", "dsn"):
-        return explicit
-
-    saved_dsn = str(config.get("DB_DSN", "")).strip()
-    if not saved_dsn:
-        return "fields"
-
-    user = urllib.parse.quote(str(config.get("DB_USER", "admin")), safe="")
-    host = str(config.get("DB_HOST", "localhost"))
-    port = str(config.get("DB_PORT", "5432"))
-    dbname = urllib.parse.quote(str(config.get("DB_NAME", "daq_db")), safe="")
-
-    pw_candidates = [
-        str(config.get("DB_PASSWORD", "")),
-        str(config.get("POSTGRES_PASSWORD", "")),
-        "admin"
-    ]
-    for pw in pw_candidates:
-        if not pw:
-            continue
-        p = urllib.parse.quote(pw, safe="")
-        if saved_dsn == f"postgresql://{user}:{p}@{host}:{port}/{dbname}":
-            return "fields"
-
-    return "dsn"
+try:
+    from daq_navi.core.config_loader import infer_db_connection_mode
+except ModuleNotFoundError:
+    from core.config_loader import infer_db_connection_mode
 
 
 def merge_preserved_secrets(new_config: Dict[str, Any], old_config: Dict[str, Any]) -> Dict[str, Any]:

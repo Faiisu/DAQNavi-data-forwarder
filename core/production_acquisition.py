@@ -35,9 +35,9 @@ from psycopg2 import sql
 from psycopg2.extras import execute_values
 
 try:
-    from .config_loader import AiSignalType, ValueRange
+    from .config_loader import AiSignalType, ValueRange, validate_config_values
 except ImportError:
-    from config_loader import AiSignalType, ValueRange
+    from config_loader import AiSignalType, ValueRange, validate_config_values
 
 
 log = logging.getLogger(__name__)
@@ -51,27 +51,18 @@ class AcquisitionFault(RuntimeError):
 
 
 def validate_production_config(cfg):
-    for setting in ("START_CHANNEL", "CHANNEL_COUNT", "CLOCK_RATE", "SECTION_LENGTH",
-                    "SECTION_COUNT", "SPOOL_MAX_BYTES", "DB_RETENTION_DAYS"):
-        if setting in cfg.raw and type(cfg.raw[setting]) is not int:
-            raise ValueError(f"{setting} must be an integer")
+    validate_config_values(cfg.raw)
     dest = str(cfg.DESTINATION).lower()
     if dest not in ("postgresql", "timescaledb", "influxdb", "mqtt"):
         raise ValueError("production destination must be PostgreSQL/TimescaleDB, InfluxDB, or MQTT")
     if not isinstance(cfg.DEVICE_ID, str) or not cfg.DEVICE_ID.strip():
         raise ValueError("DEVICE_ID is required")
-    if not 1000 <= cfg.CLOCK_RATE <= 2000:
-        raise ValueError("CLOCK_RATE must be 1000–2000 samples/s per channel")
-    if cfg.SECTION_LENGTH <= 0 or cfg.CHANNEL_COUNT <= 0:
-        raise ValueError("SECTION_LENGTH and CHANNEL_COUNT must be positive")
     if cfg.SECTION_COUNT != 0:
         raise ValueError("SECTION_COUNT must be zero for continuous production acquisition")
     if cfg.START_CHANNEL < 0 or cfg.START_CHANNEL + cfg.CHANNEL_COUNT > 16:
         raise ValueError("configured DAQ channel span is invalid")
     if cfg.SPOOL_MAX_BYTES <= 0:
         raise ValueError("SPOOL_MAX_BYTES must be positive")
-    if cfg.DB_RETENTION_DAYS < 1:
-        raise ValueError("DB_RETENTION_DAYS must be at least one day")
     if not _IDENTIFIER.fullmatch(cfg.DB_PRODUCTION_TABLE):
         raise ValueError("DB_PRODUCTION_TABLE must be a simple SQL identifier")
     if cfg.DB_PRODUCTION_TABLE == cfg.DB_TABLE:
@@ -114,8 +105,6 @@ def validate_production_config(cfg):
         raw_channel = cfg.raw.get("CHANNELS", {}).get(str(index))
         if raw_channel is None:
             raise ValueError(f"channel {index} configuration is required")
-        if type(raw_channel.get("enabled")) is not bool:
-            raise ValueError(f"channel {index} enabled must be a boolean")
         for setting, enum in (("signal_type", AiSignalType), ("value_range", ValueRange)):
             name = raw_channel.get(setting)
             members = getattr(enum, "__members__", vars(enum))
@@ -552,6 +541,7 @@ class ProductionPipeline:
                 "source": "physical_daq",
                 "destination": self.cfg.DESTINATION,
                 "session_id": self.session_id,
+                "pid": os.getpid(),
                 "checked_at_ns": time.time_ns(),
                 "last_sample_ns": self.last_sample_ns,
                 "last_fault": self.last_fault,

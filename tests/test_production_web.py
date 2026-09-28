@@ -5,6 +5,7 @@ import json
 import importlib
 import sqlite3
 import tempfile
+import threading
 import unittest
 import time
 from datetime import datetime, timezone
@@ -12,6 +13,8 @@ from pathlib import Path
 from unittest.mock import patch, MagicMock
 
 web = importlib.import_module('web.app')
+from web import config_save
+from web.config_save import SaveOperations, save_configuration
 
 
 class ProductionWebTests(unittest.TestCase):
@@ -49,6 +52,35 @@ class ProductionWebTests(unittest.TestCase):
         self.client = web.app.test_client()
         _, cookie_val = web.session_store.create_session('operator')
         self.client.set_cookie(web.COOKIE_NAME, cookie_val)
+
+    def test_save_module_accepts_fake_operations_without_flask_request_context(self):
+        current = {'CLOCK_RATE': 1000, 'DB_RETENTION_DAYS': 30,
+                   'AUTO_START_MODE': 'production', 'DESTINATION': 'postgresql'}
+        writes = []
+        unexpected = MagicMock(side_effect=AssertionError('unexpected side effect'))
+        ops = SaveOperations(
+            transition_lock=threading.RLock(),
+            read_config=lambda: current,
+            config_revision=lambda config: str(config['CLOCK_RATE']),
+            merge_config=lambda config, payload: {**config, **payload},
+            get_running_process=lambda: (None, None),
+            destination_identity=lambda config: config['DESTINATION'],
+            preflight_destination=unexpected,
+            stop_acquisition=unexpected,
+            drain_spool_for_destination_switch=unexpected,
+            apply_retention_policy=unexpected,
+            effective_timescale_retention=unexpected,
+            update_spool_owner=unexpected,
+            write_config=lambda config: writes.append(config.copy()) or True,
+            start_acquisition=unexpected,
+            redact_response_values=lambda value, *configs: value,
+            read_runtime_status=lambda config: {'pending_batches': 0},
+        )
+        result = save_configuration({'CLOCK_RATE': 1500}, ops)
+        self.assertEqual(result.reason, 'ok')
+        self.assertEqual(result.body['config']['CLOCK_RATE'], 1500)
+        self.assertEqual(writes, [{**current, 'CLOCK_RATE': 1500}])
+        unexpected.assert_not_called()
 
     def test_saved_mockup_mode_cannot_auto_start_physical_hardware(self):
         legacy = dict(self.config, AUTO_START_MODE='mockup',
@@ -116,6 +148,19 @@ class ProductionWebTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.get_json())
         self.assertEqual(self.client.get('/api/config').get_json()['DESTINATION'], 'influxdb')
         start.assert_called_once_with('production')
+
+    def test_destination_switch_reports_pending_replay_from_stopped_session(self):
+        with patch.object(web, 'get_running_process', return_value=(123, 'production')), \
+             patch.object(web, '_test_destination', return_value='ok'), \
+             patch.object(web, 'stop_acquisition', return_value={
+                 'stopped': True, 'drained': False, 'pending_replay': True, 'pending_batches': 4
+             }), \
+             patch.object(web, 'start_acquisition', return_value={'started': True}):
+            response = self.client.post('/api/config', json={'DESTINATION': 'influxdb'})
+        self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertEqual(response.get_json()['previous_session']['pending_batches'], 4)
+        self.assertTrue(response.get_json()['pending_replay'])
+        self.assertFalse(response.get_json()['drained'])
 
     def test_same_backend_target_change_saves_with_pending_records(self):
         spool = web.DurableSpool(Path(self.directory.name), self.config['SPOOL_MAX_BYTES'])
@@ -260,6 +305,16 @@ class ProductionWebTests(unittest.TestCase):
                 self.assertEqual(response.status_code, 400, f"Expected 400 for {val}")
                 self.assertEqual(self.path.read_text(encoding='utf-8'), before)
 
+    def test_web_and_acquisition_share_value_validation(self):
+        for change in ({'CLOCK_RATE': True}, {'DB_RETENTION_DAYS': 0}):
+            with self.subTest(change=change):
+                with self.assertRaises(ValueError) as web_error:
+                    web.merge_config(self.config, change)
+                runtime_config = web.DaqNaviConfig({**self.config, **change}, allow_env_overrides=False)
+                with self.assertRaises(ValueError) as core_error:
+                    web.validate_production_config(runtime_config)
+                self.assertEqual(str(web_error.exception), str(core_error.exception))
+
     def test_retention_database_error_reports_503_and_prevents_save(self):
         self.config['DB_RETENTION_DAYS'] = 30
         self.path.write_text(json.dumps(self.config), encoding='utf-8')
@@ -353,13 +408,192 @@ class ProductionWebTests(unittest.TestCase):
 
     def test_save_running_session_drains_then_restarts_saved_mode(self):
         calls = []
+        original_write = web.write_config
         with patch.object(web, 'get_running_process', return_value=(123, 'production')), \
              patch.object(web, 'stop_acquisition', side_effect=lambda manual: calls.append('stop') or {'stopped': True}), \
+             patch.object(web, 'write_config', side_effect=lambda config: calls.append('write') or original_write(config)), \
              patch.object(web, 'start_acquisition', side_effect=lambda mode: calls.append(mode) or {'started': True}):
             response = self.client.post('/api/config', json={'CLOCK_RATE': 1500})
         self.assertEqual(response.status_code, 200, response.get_json())
-        self.assertEqual(calls, ['stop', 'production'])
+        self.assertEqual(calls, ['stop', 'write', 'production'])
         self.assertEqual(self.client.get('/api/config').get_json()['CLOCK_RATE'], 1500)
+
+    def test_failed_running_save_resumes_previous_acquisition(self):
+        calls = []
+        with patch.object(web, 'get_running_process', return_value=(123, 'production')), \
+             patch.object(web, 'stop_acquisition', side_effect=lambda manual: calls.append('stop') or {'stopped': True}), \
+             patch.object(web, 'write_config', side_effect=lambda config: calls.append('write') or False), \
+             patch.object(web, 'start_acquisition', side_effect=lambda mode: calls.append('resume') or {'started': True}):
+            response = self.client.post('/api/config', json={'CLOCK_RATE': 1500})
+        self.assertEqual(response.status_code, 500)
+        self.assertFalse(response.get_json()['persisted'])
+        self.assertEqual(response.get_json()['runtime'], 'old configuration resumed')
+        self.assertEqual(calls, ['stop', 'write', 'resume'])
+        self.assertEqual(self.client.get('/api/config').get_json()['CLOCK_RATE'], self.config['CLOCK_RATE'])
+
+    def test_retention_failure_resumes_previous_acquisition(self):
+        calls = []
+        with patch.object(web, 'get_running_process', return_value=(123, 'production')), \
+             patch.object(web, 'stop_acquisition', side_effect=lambda manual: calls.append('stop') or {'stopped': True}), \
+             patch.object(web.TimescaleProductionDestination, 'ensure_schema', side_effect=OSError('offline')), \
+             patch.object(config_save, 'restore_previous_retention', return_value=None), \
+             patch.object(web, 'start_acquisition', side_effect=lambda mode: calls.append('resume') or {'started': True}):
+            response = self.client.post('/api/config', json={'DB_RETENTION_DAYS': 45})
+        self.assertEqual(response.status_code, 503)
+        self.assertFalse(response.get_json()['persisted'])
+        self.assertEqual(response.get_json()['runtime'], 'old configuration resumed')
+        self.assertEqual(calls, ['stop', 'resume'])
+
+    def test_spool_owner_restore_failure_keeps_old_disk_config_and_acquisition_stopped(self):
+        with patch.object(web, 'get_running_process', return_value=(123, 'production')), \
+             patch.object(web, '_test_destination', return_value='ok'), \
+             patch.object(web, 'stop_acquisition', return_value={'stopped': True}), \
+             patch.object(web, 'update_spool_owner', side_effect=[OSError('new owner failed'), OSError('old owner failed')]) as owner, \
+             patch.object(web, 'start_acquisition') as start:
+            response = self.client.post('/api/config', json={'DESTINATION': 'influxdb'})
+        body = response.get_json()
+        self.assertEqual(response.status_code, 503)
+        self.assertFalse(body['persisted'])
+        self.assertFalse(body['spool_owner_restored'])
+        self.assertEqual(body['runtime'], 'stopped')
+        self.assertFalse(body['resumed'])
+        self.assertEqual(owner.call_count, 2)
+        start.assert_not_called()
+        self.assertEqual(json.loads(self.path.read_text())['DESTINATION'], 'postgresql')
+
+    def test_cutover_failure_resumes_old_acquisition_without_writing_config(self):
+        with patch.object(web, 'get_running_process', return_value=(123, 'production')), \
+             patch.object(web, '_test_destination', return_value='ok'), \
+             patch.object(web, 'stop_acquisition', return_value={'stopped': True}), \
+             patch.object(web, 'drain_spool_for_destination_switch', side_effect=OSError('cutover failed')), \
+             patch.object(web, 'write_config') as write, \
+             patch.object(web, 'start_acquisition', return_value={'started': True}) as start:
+            response = self.client.post('/api/config', json={'DESTINATION': 'influxdb'})
+        self.assertEqual(response.status_code, 503)
+        self.assertFalse(response.get_json()['persisted'])
+        self.assertEqual(response.get_json()['runtime'], 'old configuration resumed')
+        write.assert_not_called()
+        start.assert_called_once_with('production')
+        self.assertEqual(json.loads(self.path.read_text())['DESTINATION'], 'postgresql')
+
+    def test_stop_exception_keeps_config_and_reports_unknown_runtime(self):
+        with patch.object(web, 'get_running_process', return_value=(123, 'production')), \
+             patch.object(web, 'stop_acquisition', side_effect=OSError('stop failed')), \
+             patch.object(web, 'write_config') as write, \
+             patch.object(web, 'start_acquisition') as start:
+            response = self.client.post('/api/config', json={'CLOCK_RATE': 1500})
+        self.assertEqual(response.status_code, 503)
+        self.assertFalse(response.get_json()['persisted'])
+        self.assertEqual(response.get_json()['runtime'], 'unknown')
+        write.assert_not_called()
+        start.assert_not_called()
+        self.assertEqual(json.loads(self.path.read_text())['CLOCK_RATE'], self.config['CLOCK_RATE'])
+
+    def test_retention_restore_failure_keeps_old_disk_config_and_acquisition_stopped(self):
+        with patch.object(web, 'get_running_process', return_value=(123, 'production')), \
+             patch.object(web, 'stop_acquisition', return_value={'stopped': True}), \
+             patch.object(web.TimescaleProductionDestination, 'ensure_schema', side_effect=OSError('apply failed')), \
+             patch.object(config_save, 'restore_previous_retention', side_effect=OSError('restore failed')), \
+             patch.object(web, 'start_acquisition') as start:
+            response = self.client.post('/api/config', json={'DB_RETENTION_DAYS': 45})
+        body = response.get_json()
+        self.assertEqual(response.status_code, 503)
+        self.assertFalse(body['persisted'])
+        self.assertFalse(body['retention_compensated'])
+        self.assertEqual(body['runtime'], 'stopped')
+        self.assertFalse(body['resumed'])
+        start.assert_not_called()
+        self.assertEqual(json.loads(self.path.read_text())['DB_RETENTION_DAYS'], 30)
+
+    def test_config_write_failure_and_retention_restore_failure_do_not_resume(self):
+        with patch.object(web, 'get_running_process', return_value=(123, 'production')), \
+             patch.object(web, 'stop_acquisition', return_value={'stopped': True}), \
+             patch.object(web.TimescaleProductionDestination, 'ensure_schema'), \
+             patch.object(web, 'effective_timescale_retention', return_value='45 days'), \
+             patch.object(web, 'write_config', return_value=False), \
+             patch.object(config_save, 'restore_previous_retention', side_effect=OSError('restore failed')), \
+             patch.object(web, 'start_acquisition') as start:
+            response = self.client.post('/api/config', json={'DB_RETENTION_DAYS': 45})
+        body = response.get_json()
+        self.assertEqual(response.status_code, 500)
+        self.assertFalse(body['persisted'])
+        self.assertFalse(body['retention_compensated'])
+        self.assertEqual(body['runtime'], 'stopped')
+        start.assert_not_called()
+        self.assertEqual(json.loads(self.path.read_text())['DB_RETENTION_DAYS'], 30)
+
+    def test_write_failure_after_replace_reports_new_disk_config_and_stays_stopped(self):
+        def replaced_then_failed(config):
+            self.path.write_text(json.dumps(config), encoding='utf-8')
+            return False
+
+        with patch.object(web, 'get_running_process', return_value=(123, 'production')), \
+             patch.object(web, 'stop_acquisition', return_value={'stopped': True}), \
+             patch.object(web, 'write_config', side_effect=replaced_then_failed), \
+             patch.object(web, 'start_acquisition') as start:
+            response = self.client.post('/api/config', json={'CLOCK_RATE': 1500})
+        body = response.get_json()
+        self.assertEqual(response.status_code, 500)
+        self.assertTrue(body['persisted'])
+        self.assertEqual(body['runtime'], 'stopped')
+        start.assert_not_called()
+        self.assertEqual(json.loads(self.path.read_text())['CLOCK_RATE'], 1500)
+
+    def test_restart_exception_reports_saved_config_and_stopped_acquisition(self):
+        with patch.object(web, 'get_running_process', return_value=(123, 'production')), \
+             patch.object(web, 'stop_acquisition', return_value={'stopped': True}), \
+             patch.object(web, 'start_acquisition', side_effect=OSError('restart failed')):
+            response = self.client.post('/api/config', json={'CLOCK_RATE': 1500})
+        self.assertEqual(response.status_code, 503)
+        self.assertTrue(response.get_json()['persisted'])
+        self.assertEqual(response.get_json()['runtime'], 'stopped')
+        self.assertEqual(json.loads(self.path.read_text())['CLOCK_RATE'], 1500)
+
+    def test_restart_with_uncertain_child_reports_unknown_runtime(self):
+        with patch.object(web, 'get_running_process', return_value=(123, 'production')), \
+             patch.object(web, 'stop_acquisition', return_value={'stopped': True}), \
+             patch.object(web, 'start_acquisition', return_value={
+                 'started': False, 'process_may_be_running': True,
+                 'message': 'PID write failed; child may still be running',
+             }):
+            response = self.client.post('/api/config', json={'CLOCK_RATE': 1500})
+        self.assertEqual(response.status_code, 503)
+        self.assertTrue(response.get_json()['persisted'])
+        self.assertEqual(response.get_json()['runtime'], 'unknown')
+        self.assertEqual(json.loads(self.path.read_text())['CLOCK_RATE'], 1500)
+
+    def test_write_failure_with_unreadable_disk_reports_unknown_persistence(self):
+        def corrupted_then_failed(config):
+            self.path.write_text('{invalid', encoding='utf-8')
+            return False
+
+        with patch.object(web, 'get_running_process', return_value=(123, 'production')), \
+             patch.object(web, 'stop_acquisition', return_value={'stopped': True}), \
+             patch.object(web, 'write_config', side_effect=corrupted_then_failed), \
+             patch.object(web, 'start_acquisition') as start:
+            response = self.client.post('/api/config', json={'CLOCK_RATE': 1500})
+        body = response.get_json()
+        self.assertEqual(response.status_code, 500)
+        self.assertIsNone(body['persisted'])
+        self.assertEqual(body['runtime'], 'stopped')
+        start.assert_not_called()
+        self.assertEqual(self.path.read_text(), '{invalid')
+
+    def test_write_failure_with_spool_owner_restore_failure_does_not_resume(self):
+        with patch.object(web, 'get_running_process', return_value=(123, 'production')), \
+             patch.object(web, '_test_destination', return_value='ok'), \
+             patch.object(web, 'stop_acquisition', return_value={'stopped': True}), \
+             patch.object(web, 'update_spool_owner', side_effect=[None, OSError('restore failed')]), \
+             patch.object(web, 'write_config', return_value=False), \
+             patch.object(web, 'start_acquisition') as start:
+            response = self.client.post('/api/config', json={'DESTINATION': 'influxdb'})
+        body = response.get_json()
+        self.assertEqual(response.status_code, 500)
+        self.assertFalse(body['persisted'])
+        self.assertFalse(body['spool_owner_restored'])
+        self.assertEqual(body['runtime'], 'stopped')
+        start.assert_not_called()
+        self.assertEqual(json.loads(self.path.read_text())['DESTINATION'], 'postgresql')
 
     def test_reboot_uses_saved_auto_start_even_after_manual_stop(self):
         self.config['AUTO_START_ON_STARTUP'] = True
@@ -565,9 +799,12 @@ class ProductionWebTests(unittest.TestCase):
         calls = []
         with patch.object(web, 'get_running_process', return_value=(123, 'production')), \
              patch.object(web, 'stop_acquisition', return_value={'stopped': False, 'message': 'Drain timeout'}), \
+             patch.object(web, 'write_config') as write, \
              patch.object(web, 'start_acquisition', side_effect=lambda mode: calls.append(mode) or {'started': True}):
             response = self.client.post('/api/config', json={'CLOCK_RATE': 1500})
         self.assertEqual(response.status_code, 503)
+        self.assertFalse(response.get_json()['persisted'])
+        write.assert_not_called()
         self.assertEqual(calls, [])  # start_acquisition must NOT be called
 
     def test_stale_pid_process_exit_reports_faulted_without_mockup_fallback(self):

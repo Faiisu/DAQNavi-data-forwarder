@@ -18,9 +18,9 @@ import re
 import time
 import signal
 import tempfile
-import math
 import uuid
 import hashlib
+from functools import wraps
 from datetime import datetime
 import csv
 import io
@@ -31,6 +31,21 @@ from flask import Flask, render_template, jsonify, request, redirect, url_for, h
 from flask_socketio import SocketIO, emit
 
 from . import auth
+from .config_save import SaveOperations, save_configuration
+from .config_effects import (
+    drain_spool_for_destination_switch, effective_timescale_retention, update_spool_owner,
+)
+from .acquisition_lifecycle import (
+    LifecycleOperations, describe_status,
+    is_pid_running as lifecycle_is_pid_running,
+    acquisition_mode_for_pid as lifecycle_acquisition_mode_for_pid,
+    find_acquisition_child as lifecycle_find_acquisition_child,
+    get_running_process as lifecycle_get_running_process,
+    terminate_pid as lifecycle_terminate_pid,
+    reconcile_stopped_spool as lifecycle_reconcile_stopped_spool,
+    start_acquisition as lifecycle_start_acquisition,
+    stop_acquisition as lifecycle_stop_acquisition,
+)
 
 WEB_DIR = os.path.dirname(os.path.abspath(__file__))
 SERVICE_DIR = os.path.dirname(WEB_DIR)
@@ -42,13 +57,13 @@ if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
 try:
-    from daq_navi.core.config_loader import DaqNaviConfig
+    from daq_navi.core.config_loader import DaqNaviConfig, infer_db_connection_mode, validate_config_values
     from daq_navi.core.production_acquisition import (
         AcquisitionFault, DurableSpool, TimescaleProductionDestination, InfluxProductionDestination,
         validate_production_config, destination_identity,
     )
 except ModuleNotFoundError:
-    from core.config_loader import DaqNaviConfig
+    from core.config_loader import DaqNaviConfig, infer_db_connection_mode, validate_config_values
     from core.production_acquisition import (
         AcquisitionFault, DurableSpool, TimescaleProductionDestination, InfluxProductionDestination,
         validate_production_config, destination_identity,
@@ -163,6 +178,14 @@ _clear_processes = {}
 # Serializes config commits, spool ownership changes, and acquisition transitions
 # within this service process. The deployment runs a single web worker.
 CONFIG_TRANSITION_LOCK = threading.RLock()
+
+
+def serialized_acquisition_transition(operation):
+    @wraps(operation)
+    def locked(*args, **kwargs):
+        with CONFIG_TRANSITION_LOCK:
+            return operation(*args, **kwargs)
+    return locked
 
 def config_revision(config):
     stable = {key: value for key, value in config.items() if key not in ('_REV', '_WEB_MANAGED')}
@@ -290,19 +313,9 @@ def merge_config(current, changes):
             merged[key] = value
         else:
             raise ValueError(f'Unsupported setting: {key}')
-    for key in ('START_CHANNEL', 'CHANNEL_COUNT', 'CLOCK_RATE', 'SECTION_LENGTH',
-                'SECTION_COUNT', 'SPOOL_MAX_BYTES', 'DB_RETENTION_DAYS'):
-        if key in merged and type(merged[key]) is not int:
-            raise ValueError(f'{key} must be an integer')
-    if type(merged.get('AUTO_START_ON_STARTUP', False)) is not bool:
-        raise ValueError('AUTO_START_ON_STARTUP must be a boolean')
-    if merged.get('AUTO_START_MODE', 'production') not in ('production', 'mockup'):
-        raise ValueError('AUTO_START_MODE must be production or mockup')
-    if 'DB_CONNECTION_MODE' in merged:
-        if merged['DB_CONNECTION_MODE'] not in ('fields', 'dsn'):
-            raise ValueError('DB_CONNECTION_MODE must be fields or dsn')
-    else:
+    if 'DB_CONNECTION_MODE' not in merged:
         merged['DB_CONNECTION_MODE'] = auth.infer_db_connection_mode(merged)
+    validate_config_values(merged)
     if merged.get('DB_CONNECTION_MODE') == 'fields':
         user = urllib.parse.quote(str(merged.get('DB_USER', 'admin')), safe='')
         password = urllib.parse.quote(str(merged.get('DB_PASSWORD', merged.get('POSTGRES_PASSWORD', 'admin'))), safe='')
@@ -310,130 +323,32 @@ def merge_config(current, changes):
         port = str(merged.get('DB_PORT', 5432))
         dbname = urllib.parse.quote(str(merged.get('DB_NAME', 'daq_db')), safe='')
         merged['DB_DSN'] = f"postgresql://{user}:{password}@{host}:{port}/{dbname}"
-    if merged.get('DB_RETENTION_DAYS', 30) < 1:
-        raise ValueError('DB_RETENTION_DAYS must be at least one day')
-    if merged.get('CHANNEL_COUNT', 0) < 1 or merged.get('SECTION_LENGTH', 0) < 1:
-        raise ValueError('CHANNEL_COUNT and SECTION_LENGTH must be positive')
-    if not 1000 <= merged.get('CLOCK_RATE', 0) <= 2000:
-        raise ValueError('CLOCK_RATE must be 1000–2000 Hz per channel')
-    for name, channel in merged.get('CHANNELS', {}).items():
-        if type(channel.get('enabled')) is not bool:
-            raise ValueError(f'channel {name} enabled must be a boolean')
-        scale = channel.get('scale', {})
-        for field in ('low_voltage', 'high_voltage', 'low_value', 'high_value'):
-            if field in scale and (type(scale[field]) not in (int, float) or
-                                   not math.isfinite(scale[field])):
-                raise ValueError(f'channel {name} {field} must be a finite number')
     cfg = DaqNaviConfig(merged, allow_env_overrides=False)
     if merged.get('AUTO_START_MODE', 'production') == 'production':
         validate_production_config(cfg)
     return merged
 
-# Cross-platform utility to check if a process is still active on the host OS
 def is_pid_running(pid):
-    if sys.platform == "win32":
-        try:
-            # Query tasklist on Windows
-            output = subprocess.check_output(f'tasklist /fi "PID eq {pid}"', shell=True)
-            return str(pid) in str(output)
-        except Exception:
-            return False
-    else:
-        try:
-            stat_path = f'/proc/{pid}/stat'
-            if os.path.exists(stat_path) and Path(stat_path).read_text().split(') ', 1)[1][0] == 'Z':
-                return False
-            # Query signal 0 (null signal) on POSIX
-            os.kill(pid, 0)
-            return True
-        except (OSError, ProcessLookupError):
-            return False
+    return lifecycle_is_pid_running(pid, sys.platform)
+
 
 def acquisition_mode_for_pid(pid):
-    """Identify a process launched by this service from its exact command arguments."""
-    if not is_pid_running(pid):
-        return None
-    if sys.platform == 'win32':
-        return None
-    try:
-        arguments = (PROC_ROOT / str(pid) / 'cmdline').read_bytes().split(b'\0')
-    except OSError:
-        return None
-    if len(arguments) < 2:
-        return None
-    script = arguments[1].decode(errors='replace')
-    if script == os.path.join(CORE_DIR, 'mockup_stream_to_db.py'):
-        return 'mockup'
-    # A process started before the script rename may still be running.
-    if script in (
-        os.path.join(CORE_DIR, 'buffered_daq_to_timescaledb.py'),
-        os.path.join(CORE_DIR, 'stream_to_db.py'),
-    ):
-        for index, argument in enumerate(arguments[:-1]):
-            if argument == b'--config' and arguments[index + 1] == os.fsencode(CONFIG_PATH):
-                return 'production'
-    return None
+    return lifecycle_acquisition_mode_for_pid(
+        pid, is_pid_running, PROC_ROOT, CORE_DIR, CONFIG_PATH, sys.platform)
 
 
 def find_acquisition_child():
-    """Recover a live acquisition child when its PID file was overwritten."""
-    if sys.platform == 'win32':
-        return None, None
-    try:
-        tasks = (PROC_ROOT / 'self' / 'task').iterdir()
-        children = set()
-        for task in tasks:
-            children.update(int(pid) for pid in (task / 'children').read_text().split())
-    except (OSError, ValueError):
-        return None, None
-    for pid in sorted(children):
-        mode = acquisition_mode_for_pid(pid)
-        if mode:
-            return pid, mode
-    return None, None
+    return lifecycle_find_acquisition_child(PROC_ROOT, acquisition_mode_for_pid, sys.platform)
 
 
-# Retrieve the running process info if active
 def get_running_process():
-    if os.path.exists(PID_PATH) and os.path.exists(MODE_PATH):
-        try:
-            with open(PID_PATH, 'r') as f:
-                pid = int(f.read().strip())
-            with open(MODE_PATH, 'r') as f:
-                mode = f.read().strip()
-            
-            if (sys.platform == 'win32' and is_pid_running(pid)) or acquisition_mode_for_pid(pid) == mode:
-                return pid, mode
-        except Exception as e:
-            print(f"Error checking active PID file: {e}")
-    pid, mode = find_acquisition_child()
-    if pid is not None:
-        Path(PID_PATH).write_text(str(pid), encoding='utf-8')
-        Path(MODE_PATH).write_text(mode, encoding='utf-8')
-        return pid, mode
-    return None, None
+    return lifecycle_get_running_process(
+        PID_PATH, MODE_PATH, is_pid_running, acquisition_mode_for_pid,
+        find_acquisition_child, sys.platform)
 
-# Terminate process by PID cross-platform
+
 def terminate_pid(pid):
-    if sys.platform == "win32":
-        try:
-            subprocess.run(f"taskkill /pid {pid} /t /f", shell=True)
-        except Exception as e:
-            print(f"Error terminating Windows PID {pid}: {e}")
-    else:
-        try:
-            os.kill(pid, 15) # SIGTERM (graceful exit)
-            # The production writer has a 10-second drain window and a 15-second join.
-            for _ in range(250):
-                if not is_pid_running(pid):
-                    return True
-                time.sleep(0.1)
-            return False
-        except ProcessLookupError:
-            return True
-        except OSError as e:
-            print(f"Error terminating Unix PID {pid}: {e}")
-            return False
+    return lifecycle_terminate_pid(pid, is_pid_running, sys.platform)
 
 # Regex to extract statistics from the log file
 # E.g.: [STATS] polled=1,024 | written=1,024 | dropped_batches=0 (0.0%) | db_errors=0 | queue=0/200
@@ -693,268 +608,39 @@ def favicon():
 def get_config():
     try:
         config = read_config()
-        config['_REV'] = config_revision(config)
-        return jsonify(auth.redact_config_secrets(config))
+        response_config = {**config, '_REV': config_revision(config),
+                           'DB_CONNECTION_MODE': infer_db_connection_mode(config)}
+        return jsonify(auth.redact_config_secrets(response_config))
     except Exception as exc:
         return jsonify({'error': f'Failed to read configuration: {exc}'}), 500
 
 
-def drain_spool_for_destination_switch(old_config, new_config):
-    """While stopped, close open gaps and record cutover for the new destination without draining to old sink."""
-    old_cfg = DaqNaviConfig(old_config, allow_env_overrides=False)
-    new_cfg = DaqNaviConfig(new_config, allow_env_overrides=False)
-    if destination_identity(old_cfg) == destination_identity(new_cfg):
-        return
-    spool = DurableSpool(Path(old_cfg.SPOOL_DIR), old_cfg.SPOOL_MAX_BYTES)
-    try:
-        spool.close_open_gaps_for_switch(time.time_ns())
-        pending = spool.pending_batches + len(spool.pending_gaps())
-        spool.record_cutover(old_cfg.DESTINATION, new_cfg.DESTINATION, pending)
-    finally:
-        spool.close()
-
-def effective_timescale_retention(config):
-    """Read the selected production hypertable's active retention policy."""
-    import psycopg2
-    cfg = DaqNaviConfig(config, allow_env_overrides=False)
-    with psycopg2.connect(cfg.DB_DSN, connect_timeout=3) as conn:
-        with conn.cursor() as cursor:
-            cursor.execute("SELECT config->>'drop_after' FROM timescaledb_information.jobs WHERE hypertable_name=%s AND proc_name='policy_retention'", (cfg.DB_PRODUCTION_TABLE,))
-            rows = [row[0] for row in cursor.fetchall()]
-    if not rows:
-        raise RuntimeError('No active production retention policy')
-    if len(set(rows)) != 1:
-        raise RuntimeError('Multiple conflicting production retention policies are active')
-    return rows[0]
-
-def update_spool_owner(config, destination, identity):
-    cfg = DaqNaviConfig(config, allow_env_overrides=False)
-    spool = DurableSpool(Path(cfg.SPOOL_DIR), cfg.SPOOL_MAX_BYTES)
-    try:
-        spool.set_state('destination', destination)
-        if identity:
-            spool.set_state('destination_identity', identity)
-    finally:
-        spool.close()
-
-def restore_previous_retention(config, days):
-    """Compensate a policy update and verify its effective value."""
-    TimescaleProductionDestination(DaqNaviConfig(config, allow_env_overrides=False)).ensure_schema()
-    effective = effective_timescale_retention(config)
-    if effective != f"{days} days":
-        raise RuntimeError(f'readback after compensation was {effective}')
-
-def resume_after_failed_switch(was_running, destination_changed, mode, current):
-    if not (was_running and destination_changed):
-        return None
-    try:
-        return start_acquisition(mode or current.get('AUTO_START_MODE', 'production'))
-    except Exception as exc:
-        return {'started': False, 'message': auth.redact_error_message(str(exc), current)}
-
 @app.route('/api/config', methods=['POST'])
 def save_config():
-    with CONFIG_TRANSITION_LOCK:
-        return _save_config_locked()
-
-def _save_config_locked():
-    try:
-        current = read_config()
-    except Exception as exc:
-        return jsonify({'status': 'error', 'message': f'Cannot save: existing configuration file is invalid or missing ({exc})'}), 500
-    payload = {}
-    try:
-        payload = request.get_json(silent=True) or {}
-        submitted_revision = payload.pop('_REV', None)
-        if submitted_revision is not None and submitted_revision != config_revision(current):
-            return jsonify({'status': 'error', 'message': 'Configuration was modified since it was loaded. Reload before saving.'}), 409
-        payload = auth.merge_preserved_secrets(payload, current)
-        updated = merge_config(current, payload)
-    except (ValueError, TypeError, KeyError) as exc:
-        return jsonify({'status': 'error', 'message': auth.redact_error_message(str(exc), current, payload)}), 400
-    if current.get('SPOOL_DIR', '/var/lib/daq_navi/spool') != updated.get('SPOOL_DIR', '/var/lib/daq_navi/spool'):
-        return jsonify({'status': 'error', 'message': 'SPOOL_DIR changes are unsupported; pending records and gap history must remain in the existing spool.'}), 400
-    previous_retention = current.get('DB_RETENTION_DAYS', 30)
-    pid, mode = get_running_process()
-    was_running = pid is not None
-    switch_stop_result = None
-    supported_sinks = {'postgresql', 'timescaledb', 'database', 'influxdb', 'mqtt'}
-    needs_identity = (
-        current.get('AUTO_START_MODE', 'production') == 'production' or
-        updated.get('AUTO_START_MODE', 'production') == 'production'
-    ) and current.get('DESTINATION', 'postgresql') in supported_sinks and updated.get('DESTINATION', 'postgresql') in supported_sinks
-    current_identity = updated_identity = None
-    destination_changed = False
-    if needs_identity:
-        try:
-            current_identity = destination_identity(DaqNaviConfig(current, allow_env_overrides=False))
-            updated_identity = destination_identity(DaqNaviConfig(updated, allow_env_overrides=False))
-        except (ValueError, TypeError) as exc:
-            return jsonify({'status': 'error', 'message': auth.redact_error_message(str(exc), current, updated)}), 400
-        destination_changed = current_identity != updated_identity
-    retention_changed = ('DB_RETENTION_DAYS' in updated and
-                         ('DB_RETENTION_DAYS' not in current or updated['DB_RETENTION_DAYS'] != previous_retention))
-    if destination_changed and updated.get('DESTINATION', 'postgresql') in ('postgresql', 'timescaledb', 'database'):
-        if retention_changed:
-            return jsonify({'status': 'error', 'persisted': False,
-                            'message': 'Save the destination and retention days in separate operations; no changes were applied.'}), 400
-        try:
-            effective = effective_timescale_retention(updated)
-        except Exception as exc:
-            return jsonify({'status': 'error', 'persisted': False,
-                            'message': f'Could not verify retention on the new destination: {auth.redact_error_message(str(exc), current, updated)}'}), 502
-        expected = f'{previous_retention} days'
-        if effective != expected:
-            return jsonify({'status': 'error', 'persisted': False,
-                            'message': f'New destination retention is {effective}; expected {expected}. Set the target policy before switching.'}), 400
-    if destination_changed:
-        try:
-            _test_destination(updated)
-        except Exception as exc:
-            return jsonify({'status': 'error', 'message': f'New destination preflight failed: {auth.redact_error_message(str(exc), current, updated)}'}), 502
-        if pid is not None:
-            switch_stop_result = stop_acquisition(manual=False)
-            if not switch_stop_result['stopped']:
-                return jsonify({'status': 'error', 'message': 'Could not stop acquisition before switching destination.', 'persisted': False, 'runtime': 'prior acquisition may still be stopping'}), 503
-        try:
-            drain_spool_for_destination_switch(current, updated)
-        except Exception as exc:
-            recovered = None
-            if was_running:
-                recovered = start_acquisition(mode or current.get('AUTO_START_MODE', 'production'))
-            outcome = 'resumed on previous configuration' if recovered and recovered.get('started') else 'recovery failed; acquisition remains stopped'
-            return jsonify({'status': 'error', 'message': f'Could not drain the old destination spool: {auth.redact_error_message(str(exc), current, updated)}; {outcome}.', 'persisted': False, 'runtime': 'old configuration resumed' if recovered and recovered.get('started') else 'stopped', 'resumed': bool(recovered and recovered.get('started')), 'recovery': redact_response_values(recovered, current, updated)}), 503
-    retention_applied = False
-    if retention_changed and updated.get('DESTINATION', 'postgresql') in ('postgresql', 'timescaledb', 'database'):
-        try:
-            new_cfg = DaqNaviConfig(updated, allow_env_overrides=False)
-            TimescaleProductionDestination(new_cfg).ensure_schema()
-            effective = effective_timescale_retention(updated)
-            if effective != f"{updated['DB_RETENTION_DAYS']} days":
-                raise RuntimeError(f'Policy readback is {effective}; expected {updated["DB_RETENTION_DAYS"]} days')
-            retention_applied = True
-        except Exception as exc:
-            # ensure_schema may have changed the policy before raising, so always
-            # try to restore and verify the previous setting.
-            restore_error = None
-            try:
-                restore_previous_retention(current, previous_retention)
-            except Exception as restore_exc:
-                restore_error = auth.redact_error_message(str(restore_exc), current, updated)
-            recovered = resume_after_failed_switch(was_running, destination_changed, mode, current)
-            resumed = bool(recovered and recovered.get('started'))
-            recovery = (' Previous acquisition resumed.' if resumed else
-                        ' Previous acquisition remains stopped.' if was_running and destination_changed else '')
-            if restore_error:
-                message = (f'Retention apply failed ({auth.redact_error_message(str(exc), current, updated)}); compensation failed ({restore_error}). '
-                           f'Saved config remains {previous_retention} days; effective policy may differ. '
-                           f'Operator action: set retention on {current.get("DB_PRODUCTION_TABLE")} to {previous_retention} days and verify it.{recovery}')
-            else:
-                message = f'Could not apply retention policy; previous {previous_retention}-day policy was restored: {auth.redact_error_message(str(exc), current, updated)}.{recovery}'
-            return jsonify({'status': 'error', 'persisted': False, 'message': message,
-                            'runtime': 'old configuration resumed' if resumed else 'stopped' if was_running and destination_changed else 'unchanged',
-                            'resumed': resumed, 'recovery': redact_response_values(recovered, current, updated),
-                            'retention_compensated': restore_error is None}), 503
-    if destination_changed:
-        try:
-            update_spool_owner(updated, updated.get('DESTINATION', 'postgresql'), updated_identity)
-        except Exception as exc:
-            restored = True
-            try:
-                update_spool_owner(current, current.get('DESTINATION', 'postgresql'), current_identity)
-            except Exception:
-                restored = False
-            retention_restore_error = None
-            if retention_applied:
-                try:
-                    restore_previous_retention(current, previous_retention)
-                except Exception as restore_exc:
-                    retention_restore_error = auth.redact_error_message(str(restore_exc), current, updated)
-            recovered = None
-            if was_running and restored:
-                recovered = resume_after_failed_switch(was_running, destination_changed, mode, current)
-            return jsonify({'status': 'error', 'persisted': False,
-                            'runtime': 'old configuration resumed' if recovered and recovered.get('started') else 'stopped' if was_running else 'unchanged',
-                            'resumed': bool(recovered and recovered.get('started')),
-                            'spool_owner_restored': restored,
-                            'retention_compensated': retention_restore_error is None,
-                            'message': (f'Could not update spool destination ownership: {auth.redact_error_message(str(exc), current, updated)}; '
-                                        + ('old owner restored.' if restored else 'spool ownership restoration failed; inspect spool destination metadata before restarting acquisition.')
-                                        + (f' Retention compensation failed ({retention_restore_error}); verify the effective policy before retrying.' if retention_restore_error else ''))}), 503
-    if not write_config(updated):
-        spool_restored = True
-        if destination_changed:
-            try:
-                update_spool_owner(current, current.get('DESTINATION', 'postgresql'), current_identity)
-            except Exception:
-                spool_restored = False
-        compensation = 'not required'
-        if retention_applied:
-            try:
-                restore_previous_retention(current, previous_retention)
-                compensation = f'previous {previous_retention}-day policy restored'
-            except Exception as exc:
-                compensation = f'FAILED ({auth.redact_error_message(str(exc), current, updated)}); set {current.get("DB_PRODUCTION_TABLE")} retention to {previous_retention} days and verify'
-        recovered = None
-        if was_running and destination_changed and spool_restored:
-            recovered = start_acquisition(mode or current.get('AUTO_START_MODE', 'production'))
-        recovery_text = ('; prior acquisition resumed' if recovered and recovered.get('started') else
-                         '; prior acquisition recovery failed and it remains stopped' if was_running and destination_changed else '')
-        if not spool_restored:
-            recovery_text += '; spool ownership restoration failed; inspect spool metadata before restarting acquisition'
-        return jsonify({'status': 'error', 'persisted': False, 'runtime': 'old configuration resumed' if recovered and recovered.get('started') else 'stopped' if was_running and destination_changed else 'unchanged', 'resumed': bool(recovered and recovered.get('started')), 'recovery': redact_response_values(recovered, current, updated), 'spool_owner_restored': spool_restored,
-                        'message': f'Failed to save configuration; {compensation}{recovery_text}.'}), 500
-    safe_config = auth.redact_config_secrets({**updated, '_REV': config_revision(updated)})
-    if was_running and switch_stop_result:
-        target_mode = updated.get('AUTO_START_MODE') if ('AUTO_START_MODE' in (payload or {})) else (mode or updated.get('AUTO_START_MODE', 'production'))
-        start_result = start_acquisition(target_mode)
-        if not start_result['started']:
-            return jsonify({'status': 'error', 'persisted': True, 'runtime': 'stopped', 'message': 'Configuration is saved, but acquisition did not restart.', 'config': safe_config, **redact_response_values(start_result, current, updated)}), 503
-        return jsonify({'status': 'success', 'config': safe_config,
-                        'retention': ('managed by InfluxDB bucket' if updated.get('DESTINATION') == 'influxdb'
-                                      else 'managed by MQTT consumer / downstream broker' if updated.get('DESTINATION') == 'mqtt'
-                                      else 'TimescaleDB policy'),
-                        'previous_session': {'stopped': True, 'drained': True,
-                                             'pending_replay': False, 'pending_batches': 0},
-                        'drained': True, 'pending_replay': False, 'pending_batches': 0})
-    pid, mode = get_running_process()
-    if pid is not None:
-        stop_result = stop_acquisition(manual=False)
-        if not stop_result['stopped']:
-            return jsonify({'status': 'error', 'message': 'Saved; prior session is still stopping',
-                            'config': safe_config, **redact_response_values(stop_result, current, updated)}), 503
-        target_mode = updated.get('AUTO_START_MODE') if ('AUTO_START_MODE' in (payload or {})) else (mode or updated.get('AUTO_START_MODE', 'production'))
-        start_result = start_acquisition(target_mode)
-        if not start_result['started']:
-            return jsonify({'status': 'error', 'message': 'Saved; restart failed',
-                            'persisted': True, 'runtime': 'stopped', 'config': safe_config, **redact_response_values(start_result, current, updated)}), 503
-        drained = stop_result.get('drained', not stop_result.get('pending_replay', False))
-        pending_replay = stop_result.get('pending_replay', False)
-        pending_batches = stop_result.get('pending_batches', 0)
-        return jsonify({
-            'status': 'success',
-            'config': safe_config,
-            'retention_days': updated['DB_RETENTION_DAYS'],
-            'previous_session': {
-                'stopped': True,
-                'drained': drained,
-                'pending_replay': pending_replay,
-                'pending_batches': pending_batches,
-            },
-            'drained': drained,
-            'pending_replay': pending_replay,
-            'pending_batches': pending_batches,
-        })
-    runtime = read_runtime_status(updated)
-    pending = runtime.get('pending_batches', 0)
-    return jsonify({
-        'status': 'success',
-        'config': safe_config,
-        'retention_days': updated['DB_RETENTION_DAYS'],
-        'drained': pending == 0,
-        'pending_replay': pending > 0,
-        'pending_batches': pending,
-    })
+    operations = SaveOperations(
+        transition_lock=CONFIG_TRANSITION_LOCK,
+        read_config=read_config,
+        config_revision=config_revision,
+        merge_config=merge_config,
+        get_running_process=get_running_process,
+        destination_identity=lambda config: destination_identity(
+            DaqNaviConfig(config, allow_env_overrides=False)),
+        preflight_destination=_test_destination,
+        stop_acquisition=stop_acquisition,
+        drain_spool_for_destination_switch=drain_spool_for_destination_switch,
+        apply_retention_policy=lambda config: TimescaleProductionDestination(
+            DaqNaviConfig(config, allow_env_overrides=False)).ensure_schema(),
+        effective_timescale_retention=effective_timescale_retention,
+        update_spool_owner=update_spool_owner,
+        write_config=write_config,
+        start_acquisition=start_acquisition,
+        redact_response_values=redact_response_values,
+        read_runtime_status=read_runtime_status,
+    )
+    result = save_configuration(request.get_json(silent=True), operations)
+    status = {'ok': 200, 'invalid': 400, 'conflict': 409, 'failed': 500,
+              'dependency_failed': 502, 'unavailable': 503}[result.reason]
+    return jsonify(result.body), status
 
 
 @app.route('/api/retention', methods=['GET'])
@@ -1130,62 +816,21 @@ def test_destination():
 @app.route('/api/status', methods=['GET'])
 def get_status():
     pid, mode = get_running_process()
-    is_running = pid is not None
     config = read_config()
     try:
         recorded_mode = Path(MODE_PATH).read_text(encoding='utf-8').strip()
     except OSError:
         recorded_mode = None
     mode_val = mode or recorded_mode or config.get('AUTO_START_MODE', 'production')
-    dest = config.get('DESTINATION', 'postgresql')
     runtime = read_runtime_status(config) if mode_val == 'production' else {}
-    stale_pid = os.path.exists(PID_PATH) and not is_running
-    fault = runtime.get('last_fault') or ('acquisition_process_exited' if stale_pid else None)
-    writer_error = runtime.get('last_writer_error') if is_running else None
-    expected = mode_val == 'production' and (
-        bool(config.get('AUTO_START_ON_STARTUP', False)) or os.path.exists(PID_PATH))
-    fresh = time.time_ns() - runtime.get('checked_at_ns', 0) < 10_000_000_000
-    status = {
-        'service_name': 'DAQ USB-4716',
-        'port': 8081,
-        'is_running': is_running,
-        'status': ('faulted' if fault else
-                   'buffering' if writer_error else
-                   'running' if is_running else 'stopped'),
-        'mode': mode_val,
-        'run_mode': mode_val,
-        'pid': pid,
-        'destination': dest,
-        'expected_running': expected,
-        'healthy': (not fault and not writer_error and
-                    (not expected or (is_running and fresh and runtime.get('state') == 'running'))),
-        'fault': fault,
-        'pending_batches': runtime.get('pending_batches', 0),
-        'pending_bytes': runtime.get('pending_bytes', 0),
-        'spool_bytes': runtime.get('spool_bytes', 0),
-        'last_sample_ns': runtime.get('last_sample_ns'),
-        'writer_error': writer_error,
-        'gaps': read_recent_gaps(config),
-        'destination_cutovers': read_recent_cutovers(config),
-        'retention_days': (config.get('DB_RETENTION_DAYS', 30) if dest not in ('influxdb', 'mqtt') else None),
-        'retention': ('managed by InfluxDB bucket' if dest == 'influxdb'
-                      else 'managed by MQTT consumer / downstream broker' if dest == 'mqtt'
-                      else 'TimescaleDB policy'),
-    }
-    if dest == 'mqtt' and mode_val == 'production':
-        runtime_matches_destination = runtime.get('destination') == dest
-        last_delivery_ns = runtime.get('last_delivery_ns') if runtime_matches_destination else None
-        delivery_state = ('stopped' if not is_running else
-                          'unavailable' if not fresh or not runtime_matches_destination else
-                          'error' if writer_error else
-                          'completed' if last_delivery_ns else
-                          'pending' if runtime.get('pending_batches', 0) else
-                          'idle')
-        status['mqtt_delivery'] = {
-            'state': delivery_state,
-            'last_completed_ns': last_delivery_ns,
-            'qos': config.get('MQTT_PRODUCTION_QOS', 1),
-        }
+    try:
+        launched_at_ns = Path(PID_PATH).stat().st_mtime_ns if pid is not None else None
+    except OSError:
+        launched_at_ns = None
+    status = describe_status(
+        pid, mode, config, runtime, recorded_mode, os.path.exists(PID_PATH),
+        launched_at_ns, read_recent_gaps(config), read_recent_cutovers(config), time.time_ns(),
+    )
     return jsonify(status)
 
 
@@ -1379,48 +1024,32 @@ def handle_start(data):
                 emit('control_result', {'started': False, 'message': 'Unauthorized'})
             return
     req_mode = (data or {}).get('mode')
-    result = start_acquisition(req_mode)
+    with CONFIG_TRANSITION_LOCK:
+        result = start_acquisition(req_mode)
     if hasattr(request, 'namespace'):
         emit('control_result', result)
 
 
+def acquisition_operations():
+    """Bind current service effects when entering a process transition."""
+    return LifecycleOperations(
+        config_path=CONFIG_PATH, core_dir=CORE_DIR, log_path=LOG_PATH,
+        pid_path=PID_PATH, mode_path=MODE_PATH,
+        read_config=read_config, get_running_process=get_running_process,
+        read_clear_job=read_clear_job,
+        validate_config=lambda config: validate_production_config(
+            DaqNaviConfig(config, allow_env_overrides=False)),
+        start_tailing=start_tailing, stop_tailing=stop_tail_event.set,
+        emit_status=lambda status: socketio.emit('status_change', status),
+        terminate_pid=terminate_pid,
+        reconcile_stopped_spool=reconcile_stopped_spool,
+        read_runtime_status=read_runtime_status,
+    )
+
+
+@serialized_acquisition_transition
 def start_acquisition(mode=None):
-    if mode is None:
-        mode = read_config().get('AUTO_START_MODE', 'production')
-    if mode == 'real':
-        mode = 'production'
-    if mode != 'production':
-        return {'started': False, 'message': 'Only physical production acquisition is supported.'}
-    pid, _ = get_running_process()
-    if pid is not None:
-        return {'started': False, 'message': 'Acquisition is already running'}
-    config = read_config()
-    clear_job = read_clear_job(Path(config.get('SPOOL_DIR', '/var/lib/daq_navi/spool')))
-    if clear_job.get('state') in ('starting', 'running'):
-        return {'started': False, 'message': 'Wait for pending data clearing to finish'}
-    if mode == 'production':
-        try:
-            validate_production_config(DaqNaviConfig(config, allow_env_overrides=False))
-        except (ValueError, TypeError, KeyError) as exc:
-            return {'started': False, 'message': str(exc)}
-    script = 'buffered_daq_to_timescaledb.py' if mode == 'production' else 'mockup_stream_to_db.py'
-    args = [sys.executable, os.path.join(CORE_DIR, script)]
-    if mode == 'production':
-        args += ['--config', CONFIG_PATH]
-    try:
-        with open(LOG_PATH, 'a', encoding='utf-8') as output:
-            process = subprocess.Popen(args, stdout=output, stderr=subprocess.STDOUT,
-                                       env={**os.environ, 'PYTHONUNBUFFERED': '1',
-                                            'DAQ_CONFIG_PATH': CONFIG_PATH},
-                                       close_fds=sys.platform != 'win32')
-        Path(PID_PATH).write_text(str(process.pid), encoding='utf-8')
-        Path(MODE_PATH).write_text(mode, encoding='utf-8')
-        start_tailing()
-        socketio.emit('status_change', {'is_running': True, 'mode': mode,
-                                        'destination': config.get('DESTINATION')})
-        return {'started': True, 'pid': process.pid, 'mode': mode}
-    except (OSError, ValueError) as exc:
-        return {'started': False, 'message': str(exc)}
+    return lifecycle_start_acquisition(mode, acquisition_operations())
 
 
 @app.route('/api/start', methods=['POST'])
@@ -1446,70 +1075,13 @@ def handle_stop():
 
 
 def reconcile_stopped_spool(config):
-    """Clear a stale active marker after the acquisition process has exited."""
-    if config.get('AUTO_START_MODE', 'production') != 'production':
-        return True
-    try:
-        cfg = DaqNaviConfig(config, allow_env_overrides=False)
-        spool = DurableSpool(Path(cfg.SPOOL_DIR), cfg.SPOOL_MAX_BYTES)
-        try:
-            if spool.state_value('acquisition_active') == '1':
-                spool.set_state('acquisition_active', '0')
-            pending_batches = spool.pending_batches
-            pending_bytes = spool.pending_bytes
-            spool_bytes = spool.usage_bytes
-        finally:
-            spool.close()
-        target = Path(cfg.SPOOL_DIR) / 'status.json'
-        try:
-            runtime = json.loads(target.read_text(encoding='utf-8'))
-        except (OSError, ValueError):
-            runtime = {}
-        runtime.update(state='stopped', checked_at_ns=time.time_ns(),
-                       pending_batches=pending_batches, pending_bytes=pending_bytes,
-                       spool_bytes=spool_bytes)
-        temporary = target.with_suffix('.json.tmp')
-        temporary.write_text(json.dumps(runtime), encoding='utf-8')
-        os.replace(temporary, target)
-        return True
-    except Exception as exc:
-        print(f'Could not reconcile stopped spool state: {auth.redact_error_message(str(exc), config)}')
-        return False
+    return lifecycle_reconcile_stopped_spool(
+        config, DaqNaviConfig, DurableSpool, auth.redact_error_message)
 
 
+@serialized_acquisition_transition
 def stop_acquisition(manual=True):
-    pid, mode = get_running_process()
-    if pid is None:
-        stop_tail_event.set()
-        for path in (PID_PATH, MODE_PATH):
-            try:
-                os.unlink(path)
-            except FileNotFoundError:
-                pass
-        config = read_config()
-        reconciled = reconcile_stopped_spool(config)
-        runtime = read_runtime_status(config)
-        pending = runtime.get('pending_batches', 0)
-        return {'stopped': True, 'spool_state_reconciled': reconciled, 'pending_batches': pending, 'pending_replay': pending > 0,
-                'drained': pending == 0, 'writer_error': runtime.get('last_writer_error')}
-    stopped = terminate_pid(pid)
-    if not stopped:
-        return {'stopped': False, 'message': 'Drain timeout; acquisition is still stopping'}
-    stop_tail_event.set()
-    for path in (PID_PATH, MODE_PATH):
-        try:
-            os.unlink(path)
-        except FileNotFoundError:
-            pass
-    config = read_config()
-    reconciled = reconcile_stopped_spool(config)
-    runtime = read_runtime_status(config)
-    socketio.emit('status_change', {'is_running': False, 'mode': mode or config.get('AUTO_START_MODE', 'production')})
-    pending = runtime.get('pending_batches', 0)
-    return {'stopped': True, 'spool_state_reconciled': reconciled, 'pending_batches': pending,
-            'pending_replay': pending > 0,
-            'drained': pending == 0,
-            'writer_error': runtime.get('last_writer_error')}
+    return lifecycle_stop_acquisition(acquisition_operations())
 
 
 @app.route('/api/stop', methods=['POST'])
@@ -1607,7 +1179,8 @@ def init_application():
         if cfg.get('AUTO_START_ON_STARTUP', False):
             target_mode = cfg.get('AUTO_START_MODE', 'production')
             print(f"[SYSTEM] Auto-starting saved acquisition mode={target_mode}...")
-            result = start_acquisition(target_mode)
+            with CONFIG_TRANSITION_LOCK:
+                result = start_acquisition(target_mode)
             if not result['started']:
                 print(f"[SYSTEM] Auto-start failed: {result['message']}")
         else:
@@ -1615,9 +1188,11 @@ def init_application():
 
 def handle_shutdown(sig, frame):
     print("[SYSTEM] Gracefully shutting down Web GUI and sub-pipeline...")
-    pid, _ = get_running_process()
-    if pid is not None:
-        terminate_pid(pid)
+    with CONFIG_TRANSITION_LOCK:
+        result = stop_acquisition(manual=False)
+    if not result['stopped']:
+        print(f"[SYSTEM] Shutdown deferred: {result['message']}", file=sys.stderr)
+        return
     sys.exit(0)
 
 signal.signal(signal.SIGINT, handle_shutdown)
