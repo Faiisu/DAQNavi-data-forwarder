@@ -420,6 +420,30 @@ class ProductionMqttWebTests(unittest.TestCase):
         self.assertEqual(data['MQTT_PRODUCTION_TOPIC_PREFIX'], 'daq/production/v1')
         self.assertNotIn('secret', response.get_data(as_text=True))
 
+    def test_save_mqtt_topic_prefix_from_legacy_config(self):
+        legacy = dict(self.config)
+        legacy.pop('MQTT_PRODUCTION_TOPIC_PREFIX')
+        self.path.write_text(json.dumps(legacy), encoding='utf-8')
+        with patch.object(web, 'get_running_process', return_value=(None, None)), \
+             patch.object(web, '_test_destination', return_value='ok'):
+            response = self.client.post('/api/config', json={
+                'MQTT_PRODUCTION_TOPIC_PREFIX': 'plant/line-a',
+            })
+        self.assertEqual(response.status_code, 200, response.get_json())
+        saved = json.loads(self.path.read_text(encoding='utf-8'))
+        self.assertEqual(saved['MQTT_PRODUCTION_TOPIC_PREFIX'], 'plant/line-a')
+
+    def test_save_mqtt_qos_from_legacy_config(self):
+        legacy = dict(self.config)
+        legacy.pop('MQTT_PRODUCTION_QOS')
+        self.path.write_text(json.dumps(legacy), encoding='utf-8')
+        with patch.object(web, 'get_running_process', return_value=(None, None)), \
+             patch.object(web, '_test_destination', return_value='ok'):
+            response = self.client.post('/api/config', json={'MQTT_PRODUCTION_QOS': 0})
+        self.assertEqual(response.status_code, 200, response.get_json())
+        saved = json.loads(self.path.read_text(encoding='utf-8'))
+        self.assertEqual(saved['MQTT_PRODUCTION_QOS'], 0)
+
     def test_save_new_broker_and_qos_keeps_pending_records_for_latest_config(self):
         spool = production.DurableSpool(Path(self.directory.name), 1024 * 1024)
         spool.append('pending-batch', [SAMPLE])

@@ -309,7 +309,7 @@ def merge_config(current, changes):
                         channel[field] = field_value
                 channels[name] = channel
             merged[key] = channels
-        elif key in current or key in ('AUTO_START_ON_STARTUP', 'AUTO_START_MODE', 'DB_RETENTION_DAYS', 'DB_CONNECTION_MODE', 'POSTGRES_PASSWORD', 'DB_PASSWORD', 'INFLUX_TOKEN', 'MQTT_PASSWORD'):
+        elif key in current or key in ('AUTO_START_ON_STARTUP', 'AUTO_START_MODE', 'DB_RETENTION_DAYS', 'DB_CONNECTION_MODE', 'POSTGRES_PASSWORD', 'DB_PASSWORD', 'INFLUX_TOKEN', 'MQTT_PASSWORD', 'MQTT_PRODUCTION_TOPIC_PREFIX', 'MQTT_PRODUCTION_QOS'):
             merged[key] = value
         else:
             raise ValueError(f'Unsupported setting: {key}')

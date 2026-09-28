@@ -40,7 +40,7 @@ Device, channel, and destination settings are saved in `config/config.json` by C
 
 ## Testing and linting
 
-Install the project and test dependencies with `uv`, then run the suite as documented in the [test and qualification guide](tests/README.md). For the isolated full-system E2E deployment, see [deploy/e2e](deploy/e2e/README.md). This checkout has no configured lint command.
+Install the project and test dependencies with `uv`, then run the suite as documented in the [test and qualification guide](tests/README.md). For local development with bundled destinations, see [deploy/dev](deploy/dev/README.md). For the isolated full-system E2E deployment, see [deploy/e2e](deploy/e2e/README.md). This checkout has no configured lint command.
 
 ## Architecture
 
