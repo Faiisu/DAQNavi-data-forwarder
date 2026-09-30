@@ -2,7 +2,7 @@
 
 ## Where settings come from
 
-`compose.yml` reads `.env` for the web port, operator identity, session key, and origin policy. It sets `DAQ_CONFIG_PATH=/app/config/config.json`; on first start, `entrypoint.sh` copies the tracked `config.json` template into the writable `config/` directory. Config Center then saves changes to that private file. It also persists a changed operator password in the spool, which takes precedence over `DAQ_OPERATOR_HASH`.
+`compose.yml` reads `.env` for the web port, operator identity, session key, origin policy, and bundled destination credentials. It sets `DAQ_CONFIG_PATH=/app/config/config.json`; on first start, `entrypoint.sh` copies the tracked `config.json` template into the writable `config/` directory and fills that private copy with the generated database, InfluxDB, and MQTT credentials. Later starts preserve the saved file. Config Center then saves changes to it. A changed operator password is persisted in the spool and takes precedence over `DAQ_OPERATOR_HASH`.
 
 The exact defaults for acquisition and destinations are in [config.json](../../config.json). The typed loader and environment override behavior are in [core/config_loader.py](../../core/config_loader.py); Config Center validation and saves are in [web/app.py](../../web/app.py). This page points to those sources rather than copying every default into a second list.
 
@@ -16,8 +16,9 @@ On a fresh installation, the default username is `admin` and the default passwor
 | --- | --- | --- |
 | Device and sampling | `DEVICE_DESCRIPTION`, `DEVICE_ID`, `START_CHANNEL`, `CHANNEL_COUNT`, `CLOCK_RATE`, `SECTION_LENGTH` | Selects the physical input span and capture rate. Match these to the device and wiring. |
 | Channel interpretation | `CHANNELS.*.enabled`, `label`, `unit`, `signal_type`, `value_range`, `scale` | Converts voltage to engineering values; production requires calibration on enabled channels. |
+| Cycle counting | `CHANNELS.*.counter.enabled`, `direction`, `threshold`, `interval_seconds` | Counts crossings of the calibrated value per enabled channel. `direction` is `up` or `down`; `threshold` is a finite number in the channel's calibrated unit. `interval_seconds` accepts 1–86,400 whole seconds and defaults to `1`. Counting is disabled by default. |
 | Startup | `AUTO_START_ON_STARTUP` | Controls whether physical acquisition begins after service startup. An older saved mockup mode disables auto-start until the operator saves the updated configuration. |
-| Delivery | `DESTINATION`, `DB_*`, `INFLUX_*`, `MQTT_*` | Selects one reachable external target. The Compose project does not create it. |
+| Delivery | `DESTINATION`, `DB_*`, `INFLUX_*`, `MQTT_*` | Selects one reachable target. The main Compose project includes all three destination services. |
 | Local durability | `SPOOL_DIR`, `SPOOL_MAX_BYTES` | Bounds local pending data. Config Center does not support changing `SPOOL_DIR` after data exists. |
 
 ## Database connection mode

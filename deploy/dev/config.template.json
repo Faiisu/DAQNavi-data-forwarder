@@ -124,7 +124,7 @@
       }
     }
   },
-  "DESTINATION": "postgresql",
+  "DESTINATION": "influxdb",
   "DB_HOST": "pg",
   "DB_PORT": 5432,
   "DB_NAME": "daq_navi_dev",

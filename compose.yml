@@ -16,10 +16,26 @@ services:
       DAQ_SESSION_KEY: "${DAQ_SESSION_KEY:?Set DAQ_SESSION_KEY in .env}"
       ALLOWED_ORIGINS: "${ALLOWED_ORIGINS:-*}"
       DAQ_CONFIG_PATH: /app/config/config.json
+      DAQ_BUNDLED_DESTINATIONS: "true"
+      DAQ_DB_NAME: "${DAQ_DB_NAME:-daq_db}"
+      DAQ_DB_USER: "${DAQ_DB_USER:-admin}"
+      DAQ_DB_PASSWORD: "${DAQ_DB_PASSWORD:?Set DAQ_DB_PASSWORD in .env}"
+      DAQ_INFLUX_ORG: "${DAQ_INFLUX_ORG:-mddp}"
+      DAQ_INFLUX_BUCKET: "${DAQ_INFLUX_BUCKET:-daq_telemetry}"
+      DAQ_INFLUX_TOKEN: "${DAQ_INFLUX_TOKEN:?Set DAQ_INFLUX_TOKEN in .env}"
+      DAQ_MQTT_USER: "${DAQ_MQTT_USER:-daqnavi}"
+      DAQ_MQTT_PASSWORD: "${DAQ_MQTT_PASSWORD:?Set DAQ_MQTT_PASSWORD in .env}"
     ports:
       - "${DAQ_PORT:-8081}:8081"
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+      influxdb:
+        condition: service_healthy
+      mqtt:
+        condition: service_started
     volumes:
       - /dev:/dev
       - /usr/lib:/usr/lib:ro
@@ -27,6 +43,7 @@ services:
       - /etc/biobdaq:/etc/biobdaq:ro
       - /var/lib/daq:/var/lib/daq:ro
       - ./config:/app/config
+      - ./config/mqtt/server.crt:/main-mqtt/server.crt:ro
       - daq_spool:/var/lib/daq_navi/spool
     healthcheck:
       test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8081/api/health', timeout=3)\""]
@@ -35,5 +52,75 @@ services:
       retries: 3
       start_period: 20s
 
+  timescaledb:
+    image: timescale/timescaledb:latest-pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: "${DAQ_DB_NAME:-daq_db}"
+      POSTGRES_USER: "${DAQ_DB_USER:-admin}"
+      POSTGRES_PASSWORD: "${DAQ_DB_PASSWORD:?Set DAQ_DB_PASSWORD in .env}"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 180s
+
+  influxdb:
+    image: influxdb:2.7
+    restart: unless-stopped
+    ports:
+      - "${DAQ_INFLUX_HOST_PORT:-8086}:8086"
+    environment:
+      DOCKER_INFLUXDB_INIT_MODE: setup
+      DOCKER_INFLUXDB_INIT_USERNAME: "${DAQ_INFLUX_USER:-admin}"
+      DOCKER_INFLUXDB_INIT_PASSWORD: "${DAQ_INFLUX_PASSWORD:?Set DAQ_INFLUX_PASSWORD in .env}"
+      DOCKER_INFLUXDB_INIT_ORG: "${DAQ_INFLUX_ORG:-mddp}"
+      DOCKER_INFLUXDB_INIT_BUCKET: "${DAQ_INFLUX_BUCKET:-daq_telemetry}"
+      DOCKER_INFLUXDB_INIT_ADMIN_TOKEN: "${DAQ_INFLUX_TOKEN:?Set DAQ_INFLUX_TOKEN in .env}"
+    volumes:
+      - influx_data:/var/lib/influxdb2
+      - influx_config:/etc/influxdb2
+    healthcheck:
+      test: ["CMD", "influx", "ping", "--host", "http://localhost:8086"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 180s
+
+  mqtt:
+    image: eclipse-mosquitto:2
+    restart: unless-stopped
+    command:
+      - /bin/sh
+      - -ec
+      - |
+        cp /mosquitto/certs/server.key /mosquitto/data/server.key
+        chown mosquitto:mosquitto /mosquitto/data/server.key
+        chmod 600 /mosquitto/data/server.key
+        if [ -f /mosquitto/data/passwordfile ]; then
+          mosquitto_passwd -b /mosquitto/data/passwordfile "$$MQTT_USERNAME" "$$MQTT_PASSWORD"
+        else
+          mosquitto_passwd -c -b /mosquitto/data/passwordfile "$$MQTT_USERNAME" "$$MQTT_PASSWORD"
+        fi
+        chown mosquitto:mosquitto /mosquitto/data/passwordfile
+        exec mosquitto -c /mosquitto/config/mosquitto.conf
+    environment:
+      MQTT_USERNAME: "${DAQ_MQTT_USER:-daqnavi}"
+      MQTT_PASSWORD: "${DAQ_MQTT_PASSWORD:?Set DAQ_MQTT_PASSWORD in .env}"
+    ports:
+      - "127.0.0.1:${DAQ_MQTT_HOST_PORT:-8883}:8883"
+    volumes:
+      - ./deploy/main/mqtt/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - ./config/mqtt/server.crt:/mosquitto/certs/server.crt:ro
+      - ./config/mqtt/server.key:/mosquitto/certs/server.key:ro
+      - mqtt_data:/mosquitto/data
+
 volumes:
   daq_spool:
+  pg_data:
+  influx_data:
+  influx_config:
+  mqtt_data:

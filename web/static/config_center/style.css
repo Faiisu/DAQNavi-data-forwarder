@@ -101,6 +101,35 @@ h1 { margin-bottom: 5px; font: 800 clamp(24px, 2.4vw, 31px)/1.18 var(--display);
 .form-column, .info-column { display: grid; grid-template-columns: minmax(0, 1fr); gap: 14px; min-width: 0; }
 .info-column { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .table-wrap { width: 100%; overflow: auto; border: 1px solid var(--line); border-radius: 7px; }
+.stream-toolbar { display: flex; align-items: end; gap: 14px; margin-bottom: 10px; }
+.stream-channel { width: 155px; flex: none; }
+.stream-meta { display: grid; gap: 4px; min-width: 0; margin-right: auto; color: var(--muted); font: 9px/1.4 var(--mono); }
+.stream-meta strong { overflow: hidden; color: var(--ink); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.stream-state { flex: none; padding: 5px 8px; border: 1px solid var(--line); border-radius: 999px; color: var(--muted); font: 500 9px var(--mono); }
+.stream-state.active { border-color: #c6e1d1; background: #f1f8f3; color: #176242; }
+.stream-note { margin: 0 0 10px; color: var(--muted); font-size: 9px; line-height: 1.5; }
+.preview-chart-panel { margin: 0 0 14px; padding: 14px 15px 10px; border: 1px solid #e8eeea; border-radius: 7px; background: #fbfcfb; }
+.preview-chart-heading { display: flex; justify-content: space-between; align-items: center; gap: 14px; }
+.preview-chart-heading > div:first-child { display: grid; gap: 4px; }
+.preview-chart-heading strong { color: var(--ink); font: 700 11px var(--display); }
+.preview-chart-heading span { color: var(--muted); font-size: 9px; }
+.preview-chart-controls { display: flex; align-items: end; gap: 10px; }
+.preview-chart-controls .field { width: 145px; }
+.preview-chart-controls .field select { height: 31px; }
+.preview-chart-wrap { position: relative; min-height: 190px; margin-top: 7px; overflow-x: auto; }
+.preview-chart-wrap svg { display: block; width: 100%; min-width: 620px; height: auto; }
+.chart-grid-line { stroke: #e8eeea; stroke-width: 1; }
+.chart-axis-line { stroke: #a9b5ae; stroke-width: 1; }
+.chart-axis-label { fill: #69766f; font: 10px var(--mono); }
+.chart-series { fill: none; stroke: var(--primary); stroke-width: 2.5; stroke-linecap: round; stroke-linejoin: round; vector-effect: non-scaling-stroke; }
+.chart-empty { position: absolute; inset: 50% auto auto 50%; margin: 0; color: var(--muted); font-size: 10px; text-align: center; transform: translate(-50%, -50%); white-space: nowrap; }
+.preview-chart-footer { display: flex; justify-content: space-between; gap: 10px; padding: 8px 0 1px; color: var(--muted); font: 9px var(--mono); }
+.preview-chart-footer strong { color: var(--primary-dark); font-weight: 600; }
+.stream-table-wrap { max-height: 440px; }
+.stream-table { min-width: 900px; font-variant-numeric: tabular-nums; }
+.stream-table td:nth-child(1), .stream-table td:nth-child(4), .stream-table td:nth-child(5), .stream-table td:nth-child(7) { font-family: var(--mono); font-size: 9px; }
+.stream-table td:nth-child(4), .stream-table td:nth-child(5) { text-align: right; }
+.stream-table td.sample-id-cell { max-width: 210px; overflow: hidden; text-overflow: ellipsis; }
 .config-table { width: 100%; min-width: 690px; border-collapse: collapse; font-size: 11px; }
 .sensor-table { min-width: 1120px; }
 .config-table th { padding: 11px; background: #f1f5f9; color: var(--muted); font: 600 10px var(--mono); text-align: left; white-space: nowrap; }
@@ -290,6 +319,18 @@ h1 { margin-bottom: 5px; font: 800 clamp(24px, 2.4vw, 31px)/1.18 var(--display);
   .runtime-actions { width: 100%; }
   .runtime-actions button { flex: 1; }
   .destination-actions { align-items: flex-start; flex-direction: column; }
+  .stream-toolbar { align-items: stretch; flex-wrap: wrap; gap: 9px; }
+  .stream-channel { width: min(100%, 180px); }
+  .stream-meta { flex: 1 1 100%; order: 2; }
+  .stream-toolbar > .button { align-self: end; }
+  .stream-state { margin-left: auto; }
+  .preview-chart-panel { padding: 11px 10px 8px; }
+  .preview-chart-heading { align-items: flex-start; flex-direction: column; }
+  .preview-chart-controls { width: 100%; }
+  .preview-chart-controls .field { width: auto; flex: 1; }
+  .preview-chart-wrap { min-height: 150px; }
+  .preview-chart-wrap svg { min-width: 560px; }
+  .preview-chart-footer { align-items: flex-start; flex-direction: column; }
   .page-footer { font-size: 7px; }
 }
 

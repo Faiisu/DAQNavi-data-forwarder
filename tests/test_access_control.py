@@ -204,6 +204,7 @@ class TestAccessControl(unittest.TestCase):
             ('GET', '/api/config'),
             ('POST', '/api/config'),
             ('GET', '/api/status'),
+            ('GET', '/api/preview'),
             ('GET', '/api/samples'),
             ('GET', '/api/retention'),
             ('GET', '/api/scan_usb'),
@@ -227,6 +228,9 @@ class TestAccessControl(unittest.TestCase):
         res = client.get('/api/config')
         self.assertEqual(res.status_code, 200)
         self.assertTrue(res.is_json)
+        preview = client.get('/api/preview?channel=all&range=1m')
+        self.assertEqual(preview.status_code, 200)
+        self.assertEqual(preview.get_json()['range'], '1m')
 
     # =========================================================================
     # Group E: WebSocket / Socket.IO Boundary Protection

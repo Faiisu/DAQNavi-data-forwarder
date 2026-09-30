@@ -27,6 +27,7 @@
         <a href="#overview"><span class="nav-icon">◉</span>Overview</a>
         <a href="#device"><span class="nav-icon">▦</span>Device & sampling</a>
         <a href="#destination"><span class="nav-icon">▤</span>Destination</a>
+        <a href="#stream"><span class="nav-icon">≋</span>Data preview</a>
         <a href="#runtime"><span class="nav-icon">▷</span>Run control</a>
       </nav>
       <div class="sidebar-bottom">
@@ -102,6 +103,15 @@
                 </div>
                 <p class="table-note">Production acquisition requires calibration for each enabled sensor. Save changes after editing this channel.</p>
               </div>
+              <div class="channel-calibration">
+                <div class="calibration-heading"><div><h4>Cycle counting</h4><p>Count crossings of the calibrated value and send one record per reporting interval.</p></div></div>
+                <div class="field-grid two">
+                  <label class="field check-field"><input id="counter-enabled" type="checkbox"><span><b>Enable cycle counting</b><small>For this channel</small></span></label>
+                  <label class="field"><span>Crossing direction</span><select id="counter-direction"><option value="up">Up</option><option value="down">Down</option></select></label>
+                  <label class="field"><span>Threshold <i>calibrated unit</i></span><input id="counter-threshold" type="number" step="any"></label>
+                  <label class="field"><span>Reporting interval <i>seconds</i></span><input id="counter-interval" type="number" min="1" max="86400" step="1"><small>Enter 1–86,400 whole seconds.</small></label>
+                </div>
+              </div>
             </div>
           </section>
 
@@ -144,8 +154,24 @@
             <div class="destination-actions"><button id="test-destination" class="button button-secondary" type="button">Test destination</button><div id="destination-result" class="inline-result" role="status" aria-live="polite"></div></div>
           </section>
 
+          <section id="stream" class="panel">
+            <div class="panel-heading"><div class="section-index">04</div><div><h2>Acquisition preview</h2><p>Recent committed samples before destination delivery, including raw and calibrated values.</p></div><span id="stream-state" class="stream-state">Waiting for samples</span></div>
+            <div class="stream-toolbar">
+              <label class="field stream-channel"><span>Channel</span><select id="stream-channel"><option value="all">All channels</option></select></label>
+              <div class="stream-meta"><span>Destination</span><strong id="stream-destination">—</strong><span id="stream-updated">Waiting for acquisition</span></div>
+              <button id="stream-pause" class="button button-quiet" type="button" aria-pressed="false">Pause view</button>
+            </div>
+            <p class="stream-note">This preview follows acquisition in the browser. It does not pause or gate delivery to the selected destination.</p>
+            <div class="preview-chart-panel">
+              <div class="preview-chart-heading"><div><strong id="stream-chart-title">Calibrated output</strong><span id="stream-chart-caption">Waiting for channel data</span></div><div class="preview-chart-controls"><label class="field"><span>Graph channel</span><select id="stream-graph-channel"><option value="auto">First active</option></select></label><label class="field"><span>Value</span><select id="stream-measure"><option value="calibrated_value">Calibrated output</option><option value="raw_voltage">Raw voltage</option></select></label><label class="field"><span>History range</span><select id="stream-range"><option value="1m">1 minute</option><option value="5m">5 minutes</option></select></label></div></div>
+              <div class="preview-chart-wrap"><svg id="stream-chart" viewBox="0 0 960 300" role="img" aria-label="Recent sample history chart"></svg><p id="stream-chart-empty" class="chart-empty">Waiting for the first committed sample.</p></div>
+              <div class="preview-chart-footer"><span id="stream-chart-range">—</span><strong id="stream-chart-latest">—</strong></div>
+            </div>
+            <div class="table-wrap stream-table-wrap"><table class="config-table stream-table" aria-label="Recent acquired samples"><thead><tr><th>Sample time</th><th>Channel</th><th>Sensor</th><th>Raw voltage</th><th>Calibrated value</th><th>Unit</th><th>Sample ID</th></tr></thead><tbody id="stream-table-body"><tr><td colspan="7" class="empty-table">Waiting for the first committed sample.</td></tr></tbody></table></div>
+          </section>
+
           <section id="runtime" class="panel">
-            <div class="panel-heading"><div class="section-index">04</div><div><h2>Run control</h2><p>Start physical acquisition manually or after service startup.</p></div></div>
+            <div class="panel-heading"><div class="section-index">05</div><div><h2>Run control</h2><p>Start physical acquisition manually or after service startup.</p></div></div>
             <div class="field-grid two">
               <label class="field check-field"><input id="AUTO_START_ON_STARTUP" type="checkbox"><span><b>Start on service startup</b><small>Start the physical DAQ after the service restarts.</small></span></label>
             </div>

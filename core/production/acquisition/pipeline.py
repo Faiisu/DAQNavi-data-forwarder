@@ -11,12 +11,18 @@ import sqlite3
 import threading
 import time
 import uuid
+from collections import defaultdict, deque
 from ..config import validate_production_config
 from ..fault import AcquisitionFault
 from ..spool import DurableSpool
+from .counter import CycleCounter
 
 class ProductionPipeline:
     """Transforms physical DAQ batches and commits them before remote transfer."""
+
+    PREVIEW_SAMPLES_PER_CHANNEL = 100
+    PREVIEW_HISTORY_SECONDS = 300
+    PREVIEW_PUBLISH_INTERVAL_NS = 1_000_000_000
 
     def __init__(self, cfg, spool_dir: Path, destination, session_id=None):
         self.enabled = validate_production_config(cfg)
@@ -24,6 +30,7 @@ class ProductionPipeline:
         self.spool = DurableSpool(spool_dir, cfg.SPOOL_MAX_BYTES)
         self.destination = destination
         self.session_id = session_id or str(uuid.uuid4())
+        self.counter = CycleCounter(cfg, self.session_id)
         self.frame_index = 0
         self.anchor_ns = None
         self.last_sample_ns = None
@@ -37,6 +44,11 @@ class ProductionPipeline:
         self.reliable_reads = 0
         self._capture_lock = threading.Lock()
         self._status_lock = threading.Lock()
+        self._preview_samples = defaultdict(lambda: deque(maxlen=self.PREVIEW_SAMPLES_PER_CHANNEL))
+        self._preview_history = defaultdict(lambda: deque(maxlen=self.PREVIEW_HISTORY_SECONDS))
+        self._preview_buckets = {}
+        self._preview_published_ns = 0
+        self._load_preview_history()
         prior_active = self.spool.state_value("acquisition_active")
         prior_last = self.spool.state_value("last_sample_ns")
         if prior_active == "1" and prior_last:
@@ -48,6 +60,7 @@ class ProductionPipeline:
                         int(last_gap_end) if last_gap_end is not None else 0)
             self.spool.open_gap(start, "between_runs")
         self.spool.set_state("acquisition_active", "1")
+        self._publish_preview(force=True)
         self.publish_status()
 
     @property
@@ -95,6 +108,117 @@ class ProductionPipeline:
             self.spool.record_gap(start_ns, end_ns, cause)
         except sqlite3.Error:
             log.exception("Could not persist acquisition gap: %s", cause)
+
+    def _publish_preview(self, rows=None, force=False):
+        """Atomically publish a small, recent view of committed samples for the operator UI."""
+        now_ns = time.time_ns()
+        if rows:
+            for row in rows:
+                sample = {key: row[key] for key in (
+                    "time_ns", "sample_id", "channel", "sensor_name",
+                    "raw_voltage", "calibrated_value", "unit",
+                )}
+                channel = int(row["channel"])
+                self._preview_samples[channel].append(sample)
+                self._accumulate_preview(channel, row)
+        if not force and now_ns - self._preview_published_ns < self.PREVIEW_PUBLISH_INTERVAL_NS:
+            return
+        history = sorted(
+            (item for channel_history in self._preview_history.values() for item in channel_history),
+            key=lambda item: item["time_ns"],
+        )
+        preview = {
+            "session_id": self.session_id,
+            "destination": self.cfg.DESTINATION,
+            "checked_at_ns": now_ns,
+            "samples": sorted(
+                (sample for channel_samples in self._preview_samples.values()
+                 for sample in channel_samples),
+                key=lambda sample: sample["time_ns"], reverse=True,
+            ),
+            "history": history,
+        }
+        target = self.spool.directory / "preview.json"
+        temporary = target.with_suffix(".json.tmp")
+        try:
+            with open(temporary, "w", encoding="utf-8") as output:
+                json.dump(preview, output, separators=(",", ":"), allow_nan=False)
+                output.flush()
+            os.replace(temporary, target)
+            self._preview_published_ns = now_ns
+        except OSError:
+            log.exception("Could not publish acquisition preview")
+
+    def _load_preview_history(self):
+        """Retain the last five minutes of compact history across browser and process restarts."""
+        path = self.spool.directory / "preview.json"
+        try:
+            existing = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return
+        cutoff_ns = time.time_ns() - self.PREVIEW_HISTORY_SECONDS * 1_000_000_000
+        records = [item for item in existing.get("history", [])
+                   if int(item.get("time_ns", 0)) >= cutoff_ns]
+        for item in sorted(records, key=lambda record: record.get("time_ns", 0)):
+            self._preview_history[int(item["channel"])].append(item)
+
+    def _accumulate_preview(self, channel, row):
+        bucket_ns = int(row["time_ns"]) // 1_000_000_000 * 1_000_000_000
+        current = self._preview_buckets.get(channel)
+        if current and current["bucket_start_ns"] != bucket_ns:
+            self._finish_preview_bucket(channel, current)
+            current = None
+        if current is None:
+            current = {
+                "bucket_start_ns": bucket_ns,
+                "time_ns": bucket_ns + 500_000_000,
+                "channel": channel,
+                "sensor_name": row["sensor_name"],
+                "unit": row["unit"],
+                "sample_id": row["sample_id"],
+                "last_sample_ns": int(row["time_ns"]),
+                "sample_count": 0,
+            }
+            for name in ("raw_voltage", "calibrated_value"):
+                value = float(row[name])
+                current[f"{name}_min"] = value
+                current[f"{name}_max"] = value
+                current[f"{name}_sum"] = 0.0
+            self._preview_buckets[channel] = current
+        current["sample_count"] += 1
+        current["sensor_name"] = row["sensor_name"]
+        current["unit"] = row["unit"]
+        if int(row["time_ns"]) >= current["last_sample_ns"]:
+            current["last_sample_ns"] = int(row["time_ns"])
+            current["sample_id"] = row["sample_id"]
+        for name in ("raw_voltage", "calibrated_value"):
+            value = float(row[name])
+            current[f"{name}_min"] = min(current[f"{name}_min"], value)
+            current[f"{name}_max"] = max(current[f"{name}_max"], value)
+            current[f"{name}_sum"] += value
+
+    def _finish_preview_bucket(self, channel, bucket):
+        item = {key: value for key, value in bucket.items() if not key.endswith("_sum") and key != "last_sample_ns"}
+        for name in ("raw_voltage", "calibrated_value"):
+            item[f"{name}_avg"] = bucket[f"{name}_sum"] / bucket["sample_count"]
+        history = self._preview_history[channel]
+        if history and history[-1]["bucket_start_ns"] == bucket["bucket_start_ns"]:
+            previous = history.pop()
+            combined_count = previous["sample_count"] + item["sample_count"]
+            for name in ("raw_voltage", "calibrated_value"):
+                item[f"{name}_min"] = min(previous[f"{name}_min"], item[f"{name}_min"])
+                item[f"{name}_max"] = max(previous[f"{name}_max"], item[f"{name}_max"])
+                item[f"{name}_avg"] = (
+                    previous[f"{name}_avg"] * previous["sample_count"]
+                    + item[f"{name}_avg"] * item["sample_count"]
+                ) / combined_count
+            item["sample_count"] = combined_count
+        history.append(item)
+
+    def _finish_preview_buckets(self):
+        for channel, bucket in list(self._preview_buckets.items()):
+            self._finish_preview_bucket(channel, bucket)
+        self._preview_buckets.clear()
 
     def open_gap(self, cause: str, when_ns=None):
         point = when_ns or time.time_ns()
@@ -173,7 +297,8 @@ class ProductionPipeline:
                         "provenance": "physical_daq",
                     })
             try:
-                self.spool.append(f"{self.session_id}:{self.frame_index}", rows,
+                count_rows = self.counter.add_samples(rows)
+                self.spool.append(f"{self.session_id}:{self.frame_index}", rows + count_rows,
                                   first_sample_ns=rows[0]["time_ns"],
                                   last_sample_ns=rows[-1]["time_ns"])
             except AcquisitionFault as exc:
@@ -182,6 +307,7 @@ class ProductionPipeline:
             self.phase_adjust_ns += phase_change_ns
             self.last_sample_ns = rows[-1]["time_ns"]
             self.state = "running"
+            self._publish_preview(rows)
             self.publish_status()
             return len(rows)
 
@@ -203,6 +329,8 @@ class ProductionPipeline:
         return True
 
     def close(self):
+        self._finish_preview_buckets()
+        self._publish_preview(force=True)
         if self.state != "failed":
             self.state = "stopped"
         self.publish_status()

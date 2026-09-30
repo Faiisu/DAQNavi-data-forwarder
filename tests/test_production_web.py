@@ -121,6 +121,31 @@ class ProductionWebTests(unittest.TestCase):
         self.assertIn('r.provenance == "physical_daq"', query)
         self.assertIn('r.device_id == "test-device"', query)
 
+    def test_preview_history_api_filters_selected_channel_and_range(self):
+        checked_at_ns = time.time_ns()
+        history = [
+            {"time_ns": checked_at_ns - 30_000_000_000, "channel": 2,
+             "calibrated_value_avg": 12.0},
+            {"time_ns": checked_at_ns - 120_000_000_000, "channel": 2,
+             "calibrated_value_avg": 10.0},
+            {"time_ns": checked_at_ns - 30_000_000_000, "channel": 3,
+             "calibrated_value_avg": 20.0},
+        ]
+        (Path(self.directory.name) / 'preview.json').write_text(json.dumps({
+            'checked_at_ns': checked_at_ns,
+            'destination': 'postgresql',
+            'session_id': 'test-session',
+            'samples': [],
+            'history': history,
+        }), encoding='utf-8')
+
+        one_minute = self.client.get('/api/preview?channel=2&range=1m').get_json()
+        five_minutes = self.client.get('/api/preview?channel=2&range=5m').get_json()
+        self.assertEqual(one_minute['range'], '1m')
+        self.assertEqual([item['calibrated_value_avg'] for item in one_minute['history']], [12.0])
+        self.assertEqual([item['calibrated_value_avg'] for item in five_minutes['history']], [10.0, 12.0])
+        self.assertEqual(self.client.get('/api/preview?range=10m').status_code, 400)
+
     def test_destination_switch_keeps_pending_spool_for_new_destination(self):
         old = dict(self.config, DESTINATION='postgresql', SPOOL_DIR=self.directory.name)
         spool = web.DurableSpool(Path(self.directory.name), old['SPOOL_MAX_BYTES'])

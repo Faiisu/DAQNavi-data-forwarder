@@ -58,10 +58,12 @@ services:
 
   influx:
     image: influxdb:2.7
+    ports:
+      - "18086:8086"
     environment:
       DOCKER_INFLUXDB_INIT_MODE: setup
-      DOCKER_INFLUXDB_INIT_USERNAME: tester
-      DOCKER_INFLUXDB_INIT_PASSWORD: testpass
+      DOCKER_INFLUXDB_INIT_USERNAME: admin
+      DOCKER_INFLUXDB_INIT_PASSWORD: adminpassword123
       DOCKER_INFLUXDB_INIT_ORG: mddp
       DOCKER_INFLUXDB_INIT_BUCKET: daq_telemetry
       DOCKER_INFLUXDB_INIT_ADMIN_TOKEN: local-dev-token
@@ -74,6 +76,29 @@ services:
       timeout: 3s
       retries: 20
       start_period: 180s
+
+  grafana:
+    image: grafana/grafana:13.2.2
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_DEFAULT_THEME: light
+    ports:
+      - "${GRAFANA_DEV_PORT:-3000}:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O- http://localhost:3000/api/health >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+    depends_on:
+      pg:
+        condition: service_healthy
+      influx:
+        condition: service_healthy
 
   mqtt:
     image: eclipse-mosquitto:2
@@ -91,3 +116,4 @@ volumes:
   influx_data:
   influx_config:
   mqtt_data:
+  grafana_data:

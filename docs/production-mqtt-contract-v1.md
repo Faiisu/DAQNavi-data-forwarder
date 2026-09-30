@@ -7,7 +7,7 @@ Scope: DAQNavi Production Telemetry MQTT Destination
 
 ## 1. Overview and Boundaries
 
-When an operator selects `mqtt` as the production destination, DAQNavi delivers physical acquisition samples and recorded acquisition gaps to an authenticated external MQTT broker.
+When an operator selects `mqtt` as the production destination, DAQNavi delivers physical acquisition samples, enabled cycle counts, and recorded acquisition gaps to an authenticated external MQTT broker.
 
 ### Responsibilities
 - **DAQNavi (Publisher):**
@@ -30,6 +30,7 @@ When an operator selects `mqtt` as the production destination, DAQNavi delivers 
 Production topics are strictly versioned and prefixed to guarantee physical data provenance and prevent collision with legacy telemetry:
 
 - **Samples:** `<MQTT_PRODUCTION_TOPIC_PREFIX>/<safe_device_id>/samples`
+- **Cycle counts:** `<MQTT_PRODUCTION_TOPIC_PREFIX>/<safe_device_id>/cycle_counts`
 - **Gaps:** `<MQTT_PRODUCTION_TOPIC_PREFIX>/<safe_device_id>/gaps`
 
 The default prefix is `daq/production/v1`.
@@ -105,6 +106,10 @@ Sample publications are batched into deterministic, byte-bounded envelopes:
 3. **Deduplication:** Subscribers must use `sample_id` as the primary key for deduplication. Ingest pipelines may also reject duplicate chunks using `chunk_id`.
 
 ---
+
+## Cycle count records
+
+When counting is enabled, the publisher also sends byte-bounded envelopes to the `cycle_counts` topic. The envelope has the same `schema_version`, `device_id`, `batch_id`, and `chunk_id` fields as a sample envelope, with a `cycle_counts` array in place of `samples`. Each record contains `record_type: "cycle_count"`, `time_ns` at the end of the completed reporting interval, `sample_id`, `session_id`, `device_id`, `channel`, `sensor_name`, `direction` (`up` or `down`), calibrated `threshold`, `interval_seconds`, `cycle_count` for that interval, `total_count` since session start, and `provenance: "physical_daq"`. Consumers deduplicate by `sample_id`. A zero count is sent for a completed interval without crossings.
 
 ## 4. Gap Wire Record Contract
 

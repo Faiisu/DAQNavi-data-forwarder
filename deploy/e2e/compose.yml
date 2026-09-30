@@ -64,8 +64,8 @@ services:
     image: influxdb:2.7
     environment:
       DOCKER_INFLUXDB_INIT_MODE: setup
-      DOCKER_INFLUXDB_INIT_USERNAME: tester
-      DOCKER_INFLUXDB_INIT_PASSWORD: testpass
+      DOCKER_INFLUXDB_INIT_USERNAME: admin
+      DOCKER_INFLUXDB_INIT_PASSWORD: adminpassword123
       DOCKER_INFLUXDB_INIT_ORG: mddp
       DOCKER_INFLUXDB_INIT_BUCKET: daq_telemetry
       DOCKER_INFLUXDB_INIT_ADMIN_TOKEN: local-test-token

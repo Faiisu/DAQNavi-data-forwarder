@@ -28,6 +28,19 @@ class InfluxProductionDestination:
     def points(rows, gaps, measurement):
         output = []
         for row in rows:
+            if row.get("record_type") == "cycle_count":
+                tags = ",".join(f"{key}={_lp_escape(row[key])}" for key in (
+                    "device_id", "channel", "session_id", "direction", "provenance"))
+                fields = ",".join((
+                    f"sample_id={_lp_string(row['sample_id'])}",
+                    f"sensor_name={_lp_string(row['sensor_name'])}",
+                    f"threshold={repr(float(row['threshold']))}",
+                    f"interval_seconds={int(row.get('interval_seconds', 1))}i",
+                    f"cycle_count={int(row['cycle_count'])}i",
+                    f"total_count={int(row['total_count'])}i",
+                ))
+                output.append(f"{_lp_escape(measurement + '_cycle_counts')},{tags} {fields} {int(row['time_ns'])}")
+                continue
             tags = ",".join(f"{key}={_lp_escape(row[key])}" for key in (
                 "device_id", "channel", "session_id", "unit", "provenance"))
             fields = {

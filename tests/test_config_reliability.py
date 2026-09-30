@@ -408,17 +408,19 @@ class TestConfigReliabilityPhase1(unittest.TestCase):
         ensure_schema.assert_not_called()
         self.assertEqual(json.loads(self.config_path.read_text())["DB_RETENTION_DAYS"], 30)
 
-    def test_new_postgresql_target_requires_matching_retention_before_stop(self):
+    def test_new_postgresql_target_does_not_require_preexisting_retention_policy(self):
         payload = self.client.get("/api/config").get_json()
         payload["DB_DSN"] = "postgresql://operator:password@new-host:5432/new-db"
         payload["DB_CONNECTION_MODE"] = "dsn"
-        with patch.object(web_module, "get_running_process", return_value=(12345, "production")), \
-             patch.object(web_module, "effective_timescale_retention", return_value="45 days"), \
-             patch.object(web_module, "stop_acquisition") as stop:
+        with patch.object(web_module, "get_running_process", return_value=(None, None)), \
+             patch.object(web_module, "_test_destination", return_value="ok"), \
+             patch.object(web_module, "effective_timescale_retention", side_effect=RuntimeError("no policy")) as read_retention, \
+             patch.object(web_module, "drain_spool_for_destination_switch"), \
+             patch.object(web_module, "update_spool_owner"):
             response = self.client.post("/api/config", json=payload)
-        self.assertEqual(response.status_code, 400)
-        self.assertFalse(response.get_json()["persisted"])
-        stop.assert_not_called()
+        self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertEqual(json.loads(self.config_path.read_text())["DB_DSN"], payload["DB_DSN"])
+        read_retention.assert_not_called()
 
     def test_retention_readback_mismatch_compensates_and_reports_if_unverified(self):
         payload = self.client.get("/api/config").get_json()

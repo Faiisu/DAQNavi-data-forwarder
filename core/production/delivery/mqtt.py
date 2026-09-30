@@ -81,12 +81,19 @@ class MQTTProductionDestination:
         events_to_wait = []
         safe_device = urllib.parse.quote(str(self.cfg.DEVICE_ID), safe="")
         sample_topic = f"{self.topic_prefix}/{safe_device}/samples"
+        count_topic = f"{self.topic_prefix}/{safe_device}/cycle_counts"
         gap_topic = f"{self.topic_prefix}/{safe_device}/gaps"
+        sample_rows = [row for row in rows if row.get("record_type") != "cycle_count"]
+        count_rows = [dict(row, interval_seconds=row.get("interval_seconds", 1))
+                      for row in rows if row.get("record_type") == "cycle_count"]
+        prepared = []
 
-        # 1. Publish sample chunks if any
-        if rows:
+        for records, topic, field in ((sample_rows, sample_topic, "samples"),
+                                      (count_rows, count_topic, "cycle_counts")):
+            if not records:
+                continue
             batch_id = hashlib.sha256(
-                f"{rows[0].get('sample_id')}:{rows[-1].get('sample_id')}:{rows[0].get('time_ns')}:{len(rows)}".encode()
+                f"{records[0].get('sample_id')}:{records[-1].get('sample_id')}:{records[0].get('time_ns')}:{len(records)}".encode()
             ).hexdigest()[:16]
 
             chunks = []
@@ -97,11 +104,11 @@ class MQTTProductionDestination:
                 "batch_id": batch_id,
             }
 
-            for row in rows:
+            for row in records:
                 if curr_chunk:
                     test_chunk = curr_chunk + [row]
                     test_chunk_id = f"{batch_id}:c{len(chunks)}"
-                    envelope = dict(base_envelope, chunk_id=test_chunk_id, samples=test_chunk)
+                    envelope = dict(base_envelope, chunk_id=test_chunk_id, **{field: test_chunk})
                     payload_len = len(json.dumps(
                         envelope, separators=(',', ':'), allow_nan=False).encode("utf-8"))
                     if payload_len <= self.max_payload_bytes:
@@ -111,12 +118,12 @@ class MQTTProductionDestination:
                     curr_chunk = []
 
                 chunk_id = f"{batch_id}:c{len(chunks)}"
-                envelope = dict(base_envelope, chunk_id=chunk_id, samples=[row])
+                envelope = dict(base_envelope, chunk_id=chunk_id, **{field: [row]})
                 payload_len = len(json.dumps(
                     envelope, separators=(',', ':'), allow_nan=False).encode("utf-8"))
                 if payload_len > self.max_payload_bytes:
                     raise ValueError(
-                        "MQTT sample envelope exceeds maximum payload size "
+                        "MQTT record envelope exceeds maximum payload size "
                         f"(sample_id={row.get('sample_id')}, actual_bytes={payload_len}, "
                         f"max_bytes={self.max_payload_bytes})")
                 curr_chunk.append(row)
@@ -125,8 +132,11 @@ class MQTTProductionDestination:
 
             for idx, chunk in enumerate(chunks):
                 chunk_id = f"{batch_id}:c{idx}"
-                envelope = dict(base_envelope, chunk_id=chunk_id, samples=chunk)
-                self._publish_tracked(sample_topic, envelope, events_to_wait)
+                envelope = dict(base_envelope, chunk_id=chunk_id, **{field: chunk})
+                prepared.append((topic, envelope))
+
+        for topic, envelope in prepared:
+            self._publish_tracked(topic, envelope, events_to_wait)
 
         # 2. Publish gaps if any
         for gap in gaps:

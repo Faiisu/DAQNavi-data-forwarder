@@ -301,9 +301,9 @@ def merge_config(current, changes):
                     raise ValueError('Each channel must be an object with a numeric key')
                 channel = dict(channels.get(name, {}))
                 for field, field_value in update.items():
-                    if field == 'scale':
+                    if field in ('scale', 'counter'):
                         if not isinstance(field_value, dict):
-                            raise ValueError(f'channel {name} scale must be an object')
+                            raise ValueError(f'channel {name} {field} must be an object')
                         channel[field] = {**channel.get(field, {}), **field_value}
                     else:
                         channel[field] = field_value
@@ -964,6 +964,65 @@ def get_samples():
         return jsonify({'message': f'Production samples unavailable: {exc}'}), 503
     return jsonify({'channel': channel, 'points': points,
                     'gaps': read_recent_gaps(config)})
+
+
+@app.route('/api/preview', methods=['GET'])
+def get_acquisition_preview():
+    """Return the bounded recent sample view captured before destination delivery."""
+    channel_arg = request.args.get('channel', 'all')
+    range_arg = request.args.get('range')
+    if range_arg not in (None, '1m', '5m'):
+        return jsonify({'message': 'range must be 1m or 5m'}), 400
+    if channel_arg != 'all':
+        try:
+            channel = int(channel_arg)
+            if not 0 <= channel < 16:
+                raise ValueError('channel must be 0–15')
+        except ValueError as exc:
+            return jsonify({'message': str(exc)}), 400
+    try:
+        limit = int(request.args.get('limit', '200'))
+        if not 1 <= limit <= 500:
+            raise ValueError('limit must be between 1 and 500')
+    except ValueError as exc:
+        return jsonify({'message': str(exc)}), 400
+
+    config = read_config()
+    path = Path(config.get('SPOOL_DIR', '/var/lib/daq_navi/spool')) / 'preview.json'
+    try:
+        preview = json.loads(path.read_text(encoding='utf-8'))
+    except FileNotFoundError:
+        preview = {}
+    except (OSError, ValueError):
+        return jsonify({'message': 'Acquisition preview is temporarily unavailable.'}), 503
+
+    samples = preview.get('samples', [])
+    history = preview.get('history', [])
+    if channel_arg != 'all':
+        samples = [sample for sample in samples if sample.get('channel') == channel]
+        history = [sample for sample in history if sample.get('channel') == channel]
+    history_checked_at_ns = None
+    if range_arg:
+        seconds = 60 if range_arg == '1m' else 300
+        history_checked_at_ns = time.time_ns()
+        cutoff_ns = history_checked_at_ns - seconds * 1_000_000_000
+        history = [item for item in history if int(item.get('time_ns', 0)) >= cutoff_ns]
+        history.sort(key=lambda item: int(item.get('time_ns', 0)))
+    pid, _ = get_running_process()
+    result = {
+        'source': 'pre_destination',
+        'destination': preview.get('destination', config.get('DESTINATION')),
+        'session_id': preview.get('session_id'),
+        'checked_at_ns': preview.get('checked_at_ns'),
+        'acquisition_running': pid is not None,
+        'channel': channel_arg,
+        'samples': samples[:limit],
+    }
+    if range_arg:
+        result['range'] = range_arg
+        result['history'] = history
+        result['history_checked_at_ns'] = history_checked_at_ns
+    return jsonify(result)
 
 @app.route('/api/scan_usb', methods=['GET'])
 def api_scan_usb():

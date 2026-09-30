@@ -1,6 +1,6 @@
-# Standalone deployment and operations
+# Main deployment and operations
 
-This Docker Compose project deploys the standalone DAQNavi service. The destination database or MQTT broker is managed separately and must be reachable before acquisition starts. Linux is the supported host for physical DAQ acquisition. For the isolated full-system E2E deployment, see [deploy/e2e](deploy/e2e/README.md).
+The main Docker Compose project deploys DAQNavi with TimescaleDB, InfluxDB, and a TLS MQTT broker on one network. Each service has a persistent volume. Linux is the supported host for physical DAQ acquisition. For the isolated full-system E2E deployment, see [deploy/e2e](deploy/e2e/README.md).
 
 ---
 
@@ -17,9 +17,8 @@ Before starting, ensure the host meets the following requirements:
      docker --version
      docker compose version
      ```
-2. **OpenSSL:** Required on the host to generate session secrets.
-3. **External Destination:** A TimescaleDB / PostgreSQL, InfluxDB 2.x, or MQTT broker must be accessible before starting acquisition. The web service can start without one.
-4. **Physical DAQ Card:**
+2. **Python 3 and OpenSSL:** Required on the host to create service secrets and the MQTT TLS certificate.
+3. **Physical DAQ Card:**
    - Connect and power the Advantech DAQ card on the Linux host.
    - Install the vendor driver & SDK ([Advantech DAQNavi Driver for Linux](https://www.advantech.com/en-sg/support/details/driver?id=1-LXHFQJ)) matching your kernel (`uname -r`) and architecture (`uname -m`).
 
@@ -37,15 +36,18 @@ Create and secure your local `.env` configuration:
 cp .env.example .env
 sed -i "s/^DAQ_SESSION_KEY=.*/DAQ_SESSION_KEY=$(openssl rand -hex 32)/" .env
 chmod 600 .env
+python3 scripts/init-main-destinations.py
 ```
+
+The script fills blank destination secrets in `.env` and creates `config/mqtt/server.crt` and `server.key`. Keep these files for later restarts and backups. Existing nonempty secrets and certificates are preserved.
 
 The closed deployment uses `ALLOWED_ORIGINS=*`, so operators can open DAQNavi through any host address on that network. Authentication still applies. This setting accepts every browser Origin header; if the service later becomes reachable from a less trusted network, set a comma-separated list of the exact browser origins instead.
 
-### Step 2: Build and Start DAQNavi
+### Step 2: Build and Start the Stack
 
 The Docker image includes Python 3.12 and installs the pinned, hash-verified packages from `requirements.lock` during the build.
 
-Start the service container in the background:
+Start DAQNavi and the three destination services in the background:
 
 ```bash
 docker compose up -d --build
@@ -72,9 +74,17 @@ curl http://localhost:8081/api/health
 
 3. In **Config Center**:
    - Configure the physical device, channel span, signal mode, and input range.
-   - Configure destination connection parameters (PostgreSQL/TimescaleDB, InfluxDB, or MQTT).
-   - Test destination connectivity, save configuration, and start acquisition.
+   - Select one bundled destination. A new private config already contains the connection values and generated secrets listed below. Existing saved configs keep their current settings.
+   - Test destination connectivity, save any changes, and start acquisition.
    *(Settings will be saved to `config/config.json` automatically)*.
+
+| Destination | Config Center connection |
+| --- | --- |
+| PostgreSQL/TimescaleDB | Host `timescaledb`, port `5432`, database/user from `DAQ_DB_NAME`/`DAQ_DB_USER`, password from `DAQ_DB_PASSWORD` |
+| InfluxDB | URL `http://influxdb:8086`, organization/bucket from `DAQ_INFLUX_ORG`/`DAQ_INFLUX_BUCKET`, token from `DAQ_INFLUX_TOKEN` |
+| MQTT | Broker `mqtt`, port `8883`, username/password from `DAQ_MQTT_USER`/`DAQ_MQTT_PASSWORD`, TLS enabled, CA certificate `/main-mqtt/server.crt` |
+
+InfluxDB's host UI is available on host port `8086` by default, including from other machines that can reach the host. The MQTT listener uses host port `8883` and binds to localhost by default; DAQNavi uses the internal service names above.
 
 ---
 
@@ -87,7 +97,7 @@ docker compose logs -f daq-navi
 
 ### Stop / Restart Service
 ```bash
-# Stop service (preserves spool volume)
+# Stop the stack (preserves all named volumes)
 docker compose down
 
 # Start service
@@ -106,8 +116,8 @@ docker compose up -d --build
 ### Backups
 Back up the following:
 - Configuration: `config/config.json`
-- Environment: `.env`
-- Data spool volume: Docker volume `daq-navi_daq_spool`
+- Environment and MQTT certificate: `.env`, `config/mqtt/`
+- Data volumes: `daq-navi_daq_spool`, `daq-navi_pg_data`, `daq-navi_influx_data`, `daq-navi_influx_config`, and `daq-navi_mqtt_data`
 
 ---
 

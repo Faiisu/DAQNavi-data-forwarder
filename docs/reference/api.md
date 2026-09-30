@@ -9,6 +9,7 @@ The Flask routes in [web/app.py](../../web/app.py) are the source of truth. DAQN
 | `POST /api/config` | Validate and save a revision-aware config change. A stale revision returns `409`. |
 | `POST /api/test_destination` | Check selected destination connectivity without writing a sample. `/api/test_db` is an alias. |
 | `GET /api/status` | Acquisition, spool, gap, cutover, and delivery state. |
+| `GET /api/preview?channel=all&limit=200` | Recent committed acquisition samples before destination delivery. `channel` accepts `all` or 0–15; `limit` accepts 1–500. Add `range=1m` or `range=5m` for one-second min/max/average history bins. Available with PostgreSQL, InfluxDB, and MQTT. |
 | `GET /api/samples?channel=N` | Recent database history for a channel; MQTT history belongs to the external consumer. |
 | `GET /api/retention` | Retention information for the selected destination. |
 | `GET /api/scan_usb` | Discover supported devices. |

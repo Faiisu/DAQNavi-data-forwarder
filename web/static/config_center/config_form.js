@@ -8,7 +8,7 @@ let channels = {};
 let selectedChannel = 0;
 let dirty = false;
 let manualDsn = false;
-const defaultChannel = () => ({enabled: false, label: '', unit: '', signal_type: 'SingleEnded', value_range: 'V_0To5', scale: {enabled: false, low_voltage: 0, high_voltage: 5, low_value: 0, high_value: 100}});
+const defaultChannel = () => ({enabled: false, label: '', unit: '', signal_type: 'SingleEnded', value_range: 'V_0To5', scale: {enabled: false, low_voltage: 0, high_voltage: 5, low_value: 0, high_value: 100}, counter: {enabled: false, direction: 'up', threshold: 0, interval_seconds: 1}});
 function setDirty(value = true) {
   dirty = value;
   $('last-saved').textContent = dirty ? 'Unsaved changes' : 'All changes saved';
@@ -142,6 +142,11 @@ function renderChannelEditor() {
   $('scale-high-voltage').value = scale.high_voltage ?? '';
   $('scale-low-value').value = scale.low_value ?? '';
   $('scale-high-value').value = scale.high_value ?? '';
+  const counter = channel.counter || defaultChannel().counter;
+  $('counter-enabled').checked = counter.enabled === true;
+  $('counter-direction').value = counter.direction || 'up';
+  $('counter-threshold').value = counter.threshold ?? 0;
+  $('counter-interval').value = counter.interval_seconds ?? 1;
   updateCalibrationStatus();
   updateWiringGuide();
   updateSignalHint();
@@ -173,6 +178,12 @@ function pullChannelEditor() {
     high_voltage: optionalNumber('scale-high-voltage'),
     low_value: optionalNumber('scale-low-value'),
     high_value: optionalNumber('scale-high-value'),
+  };
+  channel.counter = {
+    enabled: $('counter-enabled').checked,
+    direction: $('counter-direction').value,
+    threshold: $('counter-threshold').value === '' && !$('counter-enabled').checked ? 0 : optionalNumber('counter-threshold'),
+    interval_seconds: optionalNumber('counter-interval'),
   };
   channels[String(selectedChannel)] = channel;
   updateSignalHint();
@@ -397,6 +408,7 @@ $('save-top').addEventListener('click', saveConfig);
 $('test-destination').addEventListener('click', testDestination);
 $('scan-button').addEventListener('click', scanDevices);
 scaleIds.forEach((id) => $(id).addEventListener('input', () => { pullChannelEditor(); markChanged(); }));
+['counter-enabled', 'counter-direction', 'counter-threshold', 'counter-interval'].forEach((id) => $(id).addEventListener('change', () => { pullChannelEditor(); markChanged(); }));
 fields.forEach((id) => {
   if (!$(id)) return;
   $(id).addEventListener('input', () => {

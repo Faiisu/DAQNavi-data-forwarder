@@ -5,6 +5,7 @@ import os
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -122,6 +123,37 @@ class FakeDestination:
 
 
 class ProductionAcquisitionTests(unittest.TestCase):
+    def test_preview_history_aggregates_one_second_bins_and_survives_restart(self):
+        cfg = configuration()
+        base = time.time_ns() // 1_000_000_000 * 1_000_000_000
+        def row(time_ns, sample_id, raw, calibrated):
+            return {"time_ns": time_ns, "sample_id": sample_id, "channel": 0,
+                    "sensor_name": "sensor-0", "raw_voltage": raw,
+                    "calibrated_value": calibrated, "unit": "kPa"}
+
+        with tempfile.TemporaryDirectory() as directory:
+            pipeline = ProductionPipeline(cfg, Path(directory), FakeDestination(),
+                                          session_id="first-session")
+            pipeline._publish_preview([
+                row(base + 100_000_000, "a", 1.0, 10.0),
+                row(base + 900_000_000, "b", 3.0, 30.0),
+                row(base + 1_100_000_000, "c", 2.0, 20.0),
+            ], force=True)
+            pipeline._finish_preview_buckets()
+            pipeline._publish_preview(force=True)
+            pipeline.close()
+
+            restarted = ProductionPipeline(cfg, Path(directory), FakeDestination(),
+                                           session_id="second-session")
+            history = list(restarted._preview_history[0])
+            self.assertEqual(len(history), 2)
+            self.assertEqual(history[0]["raw_voltage_min"], 1.0)
+            self.assertEqual(history[0]["raw_voltage_max"], 3.0)
+            self.assertEqual(history[0]["raw_voltage_avg"], 2.0)
+            self.assertEqual(history[0]["calibrated_value_avg"], 20.0)
+            self.assertEqual(history[0]["sample_count"], 2)
+            restarted.close()
+
     def test_influx_line_protocol_uses_ns_identity_and_field_sample_id(self):
         cfg = configuration(DESTINATION='influxdb', INFLUX_TOKEN='test')
         rows = []

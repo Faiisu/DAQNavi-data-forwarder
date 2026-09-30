@@ -5,7 +5,7 @@ Choose the page by what you need to do:
 | Purpose | Start here |
 | --- | --- |
 | Learn and run the service | [README quickstart](../README.md#quickstart) |
-| Perform an operation | [Deploy and operate](../DEPLOY.md), [configure an external destination](guides/configure-destination.md), [use Config Center](../web/README.md), [qualify a destination](guides/qualify-destination.md) |
+| Perform an operation | [Deploy and operate](../DEPLOY.md), [configure a destination](guides/configure-destination.md), [use Config Center](../web/README.md), [qualify a destination](guides/qualify-destination.md) |
 | Look up a contract or setting | [Configuration reference](reference/configuration.md), [destination reference](reference/destinations.md), [HTTP API routes](reference/api.md), [MQTT v1 contract](production-mqtt-contract-v1.md) |
 | Understand design decisions | [Architecture](architecture.md), [production data flow](data-flow.md), [decision records](#decision-records) |
 

@@ -117,15 +117,6 @@ def _save_config_locked(payload, ops):
         if retention_changed:
             return outcome({'status': 'error', 'persisted': False,
                             'message': 'Save the destination and retention days in separate operations; no changes were applied.'}, 'invalid')
-        try:
-            effective = ops.effective_timescale_retention(updated)
-        except Exception as exc:
-            return outcome({'status': 'error', 'persisted': False,
-                            'message': f'Could not verify retention on the new destination: {auth.redact_error_message(str(exc), current, updated)}'}, 'dependency_failed')
-        expected = f'{previous_retention} days'
-        if effective != expected:
-            return outcome({'status': 'error', 'persisted': False,
-                            'message': f'New destination retention is {effective}; expected {expected}. Set the target policy before switching.'}, 'invalid')
     if destination_changed:
         try:
             ops.preflight_destination(updated)

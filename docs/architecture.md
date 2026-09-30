@@ -1,6 +1,6 @@
 # Architecture and design boundaries
 
-DAQNavi is an edge acquisition service operated through a Flask Config Center. The standalone Compose project starts one DAQNavi container. It keeps the saved configuration in a writable host directory and the production SQLite spool in a named volume. The selected database or MQTT broker runs separately.
+DAQNavi is an edge acquisition service operated through a Flask Config Center. The main Compose project starts DAQNavi with separate TimescaleDB, InfluxDB, and MQTT containers. It keeps the saved configuration in a writable host directory and each service's data in a named volume. Operators select one production destination at a time.
 
 ```mermaid
 flowchart LR
@@ -27,7 +27,7 @@ The durable spool is the producer/consumer handoff and recovery boundary. Its lo
 ## Why these boundaries exist
 
 - **Local commit before delivery.** Hardware capture and destination availability have different failure modes. The writer can retry a committed batch after a destination outage or restart. A read that fails before its SQLite commit is outside that replay guarantee. See [production data flow](data-flow.md).
-- **Destination outside the Compose project.** The deployment contains only DAQNavi, as required for an independent service. Operators supply a reachable external destination; the default addresses in the config template are examples and need review before acquisition.
+- **Separate destination containers.** The database and broker run on the Compose network and retain their data in distinct volumes. DAQNavi still addresses them through the destination interface, so an operator can select another reachable destination without changing acquisition code.
 - **Writable config directory and separate spool volume.** Config Center replaces its JSON file atomically within the mounted directory. The spool remains available across container recreations. This is why deployment mounts the directory and retains a named volume.
 - **Current config routes pending records.** Pending records use the latest destination after a change, while acknowledged history stays where it was written. This favors immediate recovery through the currently configured target and can split history across destinations. The decision and its duplicate risk are recorded in [ADR 0014](adr/0014-current-configuration-routes-pending-samples.md).
 - **MQTT consumer owns history.** MQTT publication establishes a broker delivery boundary; it does not provide a local query store. Consumers own deduplication, retention, and historical queries. See the [MQTT v1 contract](production-mqtt-contract-v1.md).

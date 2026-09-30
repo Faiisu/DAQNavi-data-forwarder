@@ -80,21 +80,42 @@ class TimescaleProductionDestination:
                     sql.Identifier(table)))
                 cur.execute("CALL add_columnstore_policy(%s, after => INTERVAL '1 day', if_not_exists => TRUE)",
                             (table,))
+                count_table = table + "_cycle_counts"
+                cur.execute(sql.SQL("""CREATE TABLE IF NOT EXISTS {} (
+                    time TIMESTAMPTZ NOT NULL, sample_id TEXT NOT NULL,
+                    session_id UUID NOT NULL, device_id TEXT NOT NULL,
+                    channel SMALLINT NOT NULL, sensor_name TEXT NOT NULL,
+                    direction TEXT NOT NULL, threshold DOUBLE PRECISION NOT NULL,
+                    interval_seconds INTEGER NOT NULL DEFAULT 1,
+                    cycle_count INTEGER NOT NULL, total_count BIGINT NOT NULL,
+                    provenance TEXT NOT NULL,
+                    PRIMARY KEY (time, sample_id)
+                )""").format(sql.Identifier(count_table)))
+                cur.execute(sql.SQL("ALTER TABLE {} ADD COLUMN IF NOT EXISTS interval_seconds INTEGER NOT NULL DEFAULT 1").format(
+                    sql.Identifier(count_table)))
+                cur.execute("SELECT create_hypertable(%s, 'time', if_not_exists => TRUE, chunk_time_interval => INTERVAL '1 day')", (count_table,))
+                cur.execute("SELECT job_id, config->>'drop_after' FROM timescaledb_information.jobs WHERE hypertable_name=%s AND proc_name='policy_retention'", (count_table,))
+                count_jobs = cur.fetchall()
+                if not count_jobs or any(interval != desired for _, interval in count_jobs):
+                    cur.execute("SELECT remove_retention_policy(%s, if_exists => TRUE)", (count_table,))
+                    cur.execute("SELECT add_retention_policy(%s, %s::interval)", (count_table, desired))
         self._initialized = True
 
     def write(self, rows, gaps):
         if not self._initialized:
             self.ensure_schema()
         table = self.cfg.DB_PRODUCTION_TABLE
+        sample_rows = [row for row in rows if row.get("record_type") != "cycle_count"]
+        count_rows = [row for row in rows if row.get("record_type") == "cycle_count"]
         try:
             with self._connect() as conn:
                 with conn.cursor() as cur:
-                    if rows:
+                    if sample_rows:
                         cur.execute(sql.SQL("CREATE TEMP TABLE daq_ingest_stage (LIKE {} INCLUDING DEFAULTS) ON COMMIT DROP").format(
                             sql.Identifier(table)))
                         buffer = io.StringIO()
                         writer = csv.writer(buffer)
-                        for row in rows:
+                        for row in sample_rows:
                             writer.writerow((
                                 datetime.fromtimestamp(row["time_ns"] / 1e9, timezone.utc).isoformat(),
                                 row["sample_id"], row["session_id"], row["device_id"],
@@ -113,6 +134,19 @@ class TimescaleProductionDestination:
                             raw_voltage,calibrated_value,unit,provenance
                           FROM daq_ingest_stage ON CONFLICT (time,sample_id) DO NOTHING""").format(
                             sql.Identifier(table)))
+                    if count_rows:
+                        execute_values(cur, sql.SQL("""INSERT INTO {} (
+                            time,sample_id,session_id,device_id,channel,sensor_name,
+                            direction,threshold,interval_seconds,cycle_count,total_count,provenance
+                        ) VALUES %s ON CONFLICT (time,sample_id) DO NOTHING""").format(
+                            sql.Identifier(table + "_cycle_counts")).as_string(conn), [(
+                                datetime.fromtimestamp(row["time_ns"] / 1e9, timezone.utc),
+                                row["sample_id"], row["session_id"], row["device_id"],
+                                row["channel"], row["sensor_name"], row["direction"],
+                                row["threshold"], row.get("interval_seconds", 1),
+                                row["cycle_count"], row["total_count"],
+                                row["provenance"],
+                            ) for row in count_rows])
                     if gaps:
                         execute_values(cur, """INSERT INTO daq_production_gaps
                             (gap_id,start_time,end_time,cause) VALUES %s

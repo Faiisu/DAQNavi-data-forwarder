@@ -129,6 +129,18 @@ def validate_config_values(config: dict) -> None:
         for field in ("low_voltage", "high_voltage", "low_value", "high_value"):
             if field in scale:
                 validate_finite_number(scale[field], f"channel {name} {field}")
+        counter = channel.get("counter", {})
+        if not isinstance(counter, dict):
+            raise ValueError(f"channel {name} counter must be an object")
+        if type(counter.get("enabled", False)) is not bool:
+            raise ValueError(f"channel {name} counter enabled must be a boolean")
+        if counter.get("direction", "up") not in ("up", "down"):
+            raise ValueError(f"channel {name} counter direction must be up or down")
+        if counter.get("enabled", False) or "threshold" in counter:
+            validate_finite_number(counter.get("threshold"), f"channel {name} counter threshold")
+        interval = counter.get("interval_seconds", 1)
+        if type(interval) is not int or not 1 <= interval <= 86400:
+            raise ValueError(f"channel {name} counter interval_seconds must be an integer from 1 to 86400")
 
 class ChannelConfig:
     def __init__(self, channel_id: int, raw_dict: dict):
@@ -152,6 +164,11 @@ class ChannelConfig:
         self.low_value = float(scale_dict.get("low_value", 0.0))
         self.high_value = float(scale_dict.get("high_value", 100.0))
         self.has_scale = "scale" in raw_dict
+        counter = raw_dict.get("counter", {})
+        self.counter_enabled = counter.get("enabled", False)
+        self.counter_direction = counter.get("direction", "up")
+        self.counter_threshold = counter.get("threshold")
+        self.counter_interval_seconds = counter.get("interval_seconds", 1)
 
 class DaqNaviConfig:
     def __init__(self, config_dict: dict, allow_env_overrides: bool = True):

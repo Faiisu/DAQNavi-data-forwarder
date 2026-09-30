@@ -26,8 +26,13 @@ if [ -n "$CONFIG_FILE" ] && [ ! -f "$CONFIG_FILE" ]; then
     CONFIG_DIR=$(dirname "$CONFIG_FILE")
     mkdir -p "$CONFIG_DIR"
     if [ -f "config.json" ]; then
-        cp "config.json" "$CONFIG_FILE"
-        chmod 600 "$CONFIG_FILE" 2>/dev/null || true
+        INITIAL_CONFIG="$CONFIG_FILE.initializing"
+        cp "config.json" "$INITIAL_CONFIG"
+        chmod 600 "$INITIAL_CONFIG" 2>/dev/null || true
+        if [ "${DAQ_BUNDLED_DESTINATIONS:-false}" = "true" ]; then
+            "$PY" scripts/init-main-config.py "$INITIAL_CONFIG"
+        fi
+        mv "$INITIAL_CONFIG" "$CONFIG_FILE"
     fi
 fi
 
